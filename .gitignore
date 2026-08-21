@@ -1,0 +1,33 @@
+# Repository-root ignores.
+# task-saas/.gitignore covers the application itself; this catches anything that
+# lands beside it.
+
+# Secrets — never commit, in any directory.
+.env
+.env.*
+!.env.example
+
+# Dependencies and build output
+node_modules/
+.next/
+out/
+build/
+dist/
+
+# Logs and local scratch
+*.log
+logs/
+backups/
+tmp/
+
+# Database dumps produced by scripts/backup-database.sh
+*.dump
+*.sql.gz
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
+
+# TypeScript
+*.tsbuildinfo

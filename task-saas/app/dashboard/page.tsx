@@ -12,7 +12,9 @@ export default function DashboardPage() {
   // Applies to the NEXT generation. Null means "use the server default".
   const [modelId, setModelId] = useState<string | null>(null);
 
-  const { messages, input, handleInputChange, handleSubmit, isLoading, append, data, setData } =
+  const [stopped, setStopped] = useState(false);
+
+  const { messages, input, handleInputChange, handleSubmit, isLoading, append, data, setData, stop } =
     useChat({
       api: "/api/chat",
       // Read at request time, so switching models takes effect on the next message
@@ -30,14 +32,22 @@ export default function DashboardPage() {
   const submit = useCallback(
     (event: React.FormEvent<HTMLFormElement>) => {
       setData([]);
+      setStopped(false);
       handleSubmit(event);
     },
     [handleSubmit, setData]
   );
 
+  // Cancels the in-flight generation. Whatever streamed so far is kept.
+  const stopGeneration = useCallback(() => {
+    stop();
+    setStopped(true);
+  }, [stop]);
+
   const appendMessage = useCallback(
     (message: { role: "user"; content: string }) => {
       setData([]);
+      setStopped(false);
       return append(message);
     },
     [append, setData]
@@ -77,12 +87,15 @@ export default function DashboardPage() {
               messages.map(m => <ChatMessage key={m.id} message={m} />)
             )}
             {isLoading && <ThinkingIndicator data={data} />}
+            {!isLoading && stopped && (
+              <p className="ml-4 text-[12px] font-medium text-gray-400">Generation stopped</p>
+            )}
           </div>
         </div>
 
         {/* Input Area */}
         <div className="p-4 bg-white shrink-0">
-          <Composer input={input} handleInputChange={handleInputChange} handleSubmit={submit} append={appendMessage} isLoading={isLoading} />
+          <Composer input={input} handleInputChange={handleInputChange} handleSubmit={submit} append={appendMessage} isLoading={isLoading} stop={stopGeneration} />
         </div>
       </div>
     </div>

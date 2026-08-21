@@ -180,6 +180,17 @@ Note that per-document extraction is still capped at 50,000 characters in
 
 ---
 
+## A note on OneDrive / synced folders
+
+Do not keep this project inside OneDrive, Dropbox, or iCloud. Those clients turn
+files into cloud placeholders (reparse points), and `.next` — which Next.js rewrites
+on every compile — is the worst possible candidate. The dev server then dies at
+startup with `EINVAL: invalid argument, readlink '.next/...'`.
+
+`.next`, `node_modules`, `backups/` and `*.log` are generated artifacts, not source;
+they are gitignored and should never be synced. If the error appears, `rm -rf .next`
+clears it, but the durable fix is keeping the project outside any synced directory.
+
 ## Local Development & Database Setup
 
 1. **Install dependencies:**
@@ -216,6 +227,128 @@ Note that per-document extraction is still capped at 50,000 characters in
 ```bash
 npm run test
 ```
+
+---
+
+## Production deployment
+
+CodeMind deploys as a standard Next.js application. Every secret is supplied through
+environment variables at runtime — nothing sensitive lives in the repository, the
+image, or the build.
+
+**1. Clone and install**
+```bash
+git clone <your-repo-url>
+cd codemind/task-saas
+npm install
+```
+
+**2. Configure environment**
+
+Copy `.env.example` to `.env` and fill it in. At minimum production needs
+`DATABASE_URL`, `AUTH_SECRET`, `AUTH_TRUST_HOST=true`, and at least one
+`NVIDIA_API_KEY_*`. Set `CODEMIND_DEMO_AUTH=false` — anything else lets visitors into
+a shared workspace without a password.
+
+On a hosting platform, set these in the platform's environment settings rather than
+committing a `.env`.
+
+**3. Generate the Prisma client**
+```bash
+npx prisma generate
+```
+
+**4. Apply migrations** — a separate step, never part of app startup
+```bash
+npx prisma migrate deploy
+```
+
+`migrate deploy` only applies pending migrations forward. Do **not** use
+`prisma migrate reset` (drops the database) or `prisma db push` (can drop columns
+without a migration record) against production.
+
+**5. Build and start**
+```bash
+npm run build
+npm run start
+```
+
+The recommended order is: **build → prisma generate → deploy → migrate deploy.**
+Nothing destructive runs when a container starts, so a restart or rollback can never
+mutate data as a side effect.
+
+### Docker
+
+`docker compose up -d --build` builds and runs the app; Postgres stays external and
+managed. Secrets are passed through `docker-compose.yml` from your environment and
+are never baked into the image (`.dockerignore` keeps `.env` out of the build
+context entirely).
+
+Migrations run as their own step against the built image:
+```bash
+docker compose run --rm app npx prisma migrate deploy
+```
+
+---
+
+## Migrating to Aiven PostgreSQL
+
+The application only ever reads `DATABASE_URL`. No hostname, user, password, or
+database name is hardcoded, so moving to a managed instance is a configuration
+change and requires **no code change**.
+
+```
+Local PostgreSQL  →  backup  →  Aiven PostgreSQL  →  DATABASE_URL  →  migrations  →  CodeMind
+```
+
+**1. Back up first — always**
+```bash
+./scripts/backup-database.sh --docker task-saas-db-1     # local docker Postgres
+./scripts/backup-database.sh                             # any DATABASE_URL
+```
+Writes a compressed `pg_dump` custom-format file to `backups/`. The script only
+reads; it contains no `DROP`, no `TRUNCATE`, and no reset. Verify it before going
+further:
+```bash
+pg_restore --list backups/<file>.dump | head
+```
+
+**2. Point at Aiven**
+
+Take the connection string from the Aiven console and set it as `DATABASE_URL`.
+Keep the `?sslmode=require` Aiven includes — TLS is mandatory there, and Prisma
+honours the parameter from the URL.
+```
+DATABASE_URL="YOUR_AIVEN_POSTGRES_CONNECTION_STRING"
+```
+
+**3. Create the schema**
+```bash
+npx prisma migrate deploy
+```
+
+**4. Import existing data** (only if carrying data over)
+```bash
+pg_restore --no-owner --no-privileges --data-only -d "$DATABASE_URL" backups/<file>.dump
+```
+`--data-only` loads rows into the schema the migrations just created.
+`--no-owner --no-privileges` avoids referencing local roles that do not exist on
+Aiven. Primary keys are preserved, so every ownership relationship — users →
+conversations → messages → artifacts — stays intact.
+
+**5. Verify before switching traffic**
+
+Check row counts for `User`, `Conversation`, `Message`, `Artifact` and `Project`
+against the source, sign in with an existing account, and confirm password hashes
+still authenticate (they are portable — hashing is pure scrypt with parameters
+embedded in the stored value).
+
+> **Warning:** restore into a **new, empty** database. Running `--data-only` against a
+> database that already holds rows will fail on primary-key conflicts, and running a
+> full restore over live data can overwrite it. Never run `prisma migrate reset`
+> against an instance holding real data.
+
+---
 
 ## Building a Production Version
 ```bash

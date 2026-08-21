@@ -24,6 +24,7 @@ interface StoredMessage {
   content: string;
   createdAt?: string;
   artifacts?: StoredArtifact[];
+  plan?: unknown;
 }
 
 /**
@@ -39,13 +40,15 @@ function toMessage(stored: StoredMessage): Message {
     ...(stored.createdAt ? { createdAt: new Date(stored.createdAt) } : {}),
   };
 
+  // Plans and artifacts are re-attached as the same annotations the live stream
+  // emits, so ChatMessage renders reloaded and in-flight conversations identically.
+  const annotations: JSONValue[] = [];
+  if (stored.plan) annotations.push({ codemindPlan: stored.plan } as unknown as JSONValue);
   if (stored.artifacts && stored.artifacts.length > 0) {
-    return {
-      ...base,
-      annotations: [{ codemindArtifacts: stored.artifacts } as unknown as JSONValue],
-    };
+    annotations.push({ codemindArtifacts: stored.artifacts } as unknown as JSONValue);
   }
-  return base;
+
+  return annotations.length > 0 ? { ...base, annotations } : base;
 }
 
 export default function ChatPage() {
@@ -54,6 +57,7 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(true);
   // Applies to the NEXT generation. Null means "use the server default".
   const [modelId, setModelId] = useState<string | null>(null);
+  const [stopped, setStopped] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,7 +80,7 @@ export default function ChatPage() {
     };
   }, [params.id]);
 
-  const { messages, input, handleInputChange, handleSubmit, isLoading, append, data, setData } =
+  const { messages, input, handleInputChange, handleSubmit, isLoading, append, data, setData, stop } =
     useChat({
       api: "/api/chat",
       // The conversation is the source of truth; the model is just the tool answering
@@ -89,6 +93,7 @@ export default function ChatPage() {
   const submit = useCallback(
     (event: React.FormEvent<HTMLFormElement>) => {
       setData([]);
+      setStopped(false);
       handleSubmit(event);
     },
     [handleSubmit, setData]
@@ -97,10 +102,17 @@ export default function ChatPage() {
   const appendMessage = useCallback(
     (message: { role: "user"; content: string }) => {
       setData([]);
+      setStopped(false);
       return append(message);
     },
     [append, setData]
   );
+
+  // Cancels the in-flight generation. Whatever streamed so far is kept.
+  const stopGeneration = useCallback(() => {
+    stop();
+    setStopped(true);
+  }, [stop]);
 
   if (loading) {
     return (
@@ -133,6 +145,9 @@ export default function ChatPage() {
               <ChatMessage key={m.id} message={m} />
             ))}
             {isLoading && <ThinkingIndicator data={data} />}
+            {!isLoading && stopped && (
+              <p className="ml-4 text-[12px] font-medium text-gray-400">Generation stopped</p>
+            )}
           </div>
         </div>
 
@@ -143,6 +158,7 @@ export default function ChatPage() {
             handleSubmit={submit}
             append={appendMessage}
             isLoading={isLoading}
+            stop={stopGeneration}
           />
         </div>
       </div>

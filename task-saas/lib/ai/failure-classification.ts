@@ -23,6 +23,8 @@
  * document text. See `scrubForLog`.
  */
 
+import { redactSecrets } from "@/lib/logger";
+
 export type FailureKind =
   | "rate_limit"
   | "server_error"
@@ -88,28 +90,19 @@ const HTTP_SERVER_ERROR_MAX = 599;
 /* Secret scrubbing                                                            */
 /* -------------------------------------------------------------------------- */
 
-/** Patterns that must never survive into a log line. */
-const SECRET_PATTERNS: readonly RegExp[] = [
-  /nvapi-[A-Za-z0-9_-]+/g,
-  /Bearer\s+\S+/gi,
-  /sk-[A-Za-z0-9_-]{8,}/g,
-];
-
-const REDACTED = "[redacted]";
-
 /**
- * Make an arbitrary provider string safe to log.
+ * Make an arbitrary provider string safe to log or display.
  *
- * Order matters: redact secrets FIRST, then truncate. Truncating first could slice a key
- * in half and leave the leading half unmatched by the pattern, defeating the redaction.
- * Whitespace is collapsed so a multi-line HTML error page cannot spray the log.
+ * The credential patterns live in lib/logger.ts so there is exactly one definition of
+ * "what a secret looks like"; this adds the collapsing and truncation that a provider
+ * body needs but a general log line does not.
+ *
+ * Order matters: redact FIRST, then truncate. Truncating first could slice a key in
+ * half and leave the leading fragment unmatched, defeating the redaction. Whitespace is
+ * collapsed so a multi-line HTML error page cannot spray the log.
  */
 export function scrubForLog(input: string, maxChars: number = MAX_REASON_BODY_CHARS): string {
-  let safe = input;
-  for (const pattern of SECRET_PATTERNS) {
-    safe = safe.replace(pattern, REDACTED);
-  }
-  safe = safe.replace(/\s+/g, " ").trim();
+  const safe = redactSecrets(input).replace(/\s+/g, " ").trim();
   return safe.length > maxChars ? `${safe.slice(0, maxChars)}…` : safe;
 }
 

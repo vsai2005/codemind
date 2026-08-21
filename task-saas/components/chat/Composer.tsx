@@ -30,6 +30,8 @@ interface ComposerProps {
   handleSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
   isLoading: boolean;
   append: (message: { role: "user"; content: string }) => void;
+  /** Cancels the in-flight generation. Swaps Send for Stop while streaming. */
+  stop?: () => void;
 }
 
 /** Clearing the input programmatically reuses the change handler useChat provides. */
@@ -43,6 +45,7 @@ export function Composer({
   handleSubmit,
   isLoading,
   append,
+  stop,
 }: ComposerProps): React.ReactElement {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -224,18 +227,34 @@ export function Composer({
             )}
           </button>
 
-          <button
-            type="submit"
-            disabled={!canSend}
-            aria-label="Send message"
-            title="Send message"
-            className="rounded-lg bg-gray-900 p-2 text-white shadow-sm transition-colors hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-30"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <line x1="12" y1="19" x2="12" y2="5" />
-              <polyline points="5 12 12 5 19 12" />
-            </svg>
-          </button>
+          {isLoading && stop ? (
+            // While streaming the primary action is cancellation. type="button" so it
+            // can never submit the form by accident.
+            <button
+              type="button"
+              onClick={stop}
+              aria-label="Stop generating"
+              title="Stop generating"
+              className="rounded-lg bg-gray-900 p-2 text-white shadow-sm transition-colors hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <rect x="6" y="6" width="12" height="12" rx="1.5" />
+              </svg>
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={!canSend}
+              aria-label="Send message"
+              title="Send message"
+              className="rounded-lg bg-gray-900 p-2 text-white shadow-sm transition-colors hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-30"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <line x1="12" y1="19" x2="12" y2="5" />
+                <polyline points="5 12 12 5 19 12" />
+              </svg>
+            </button>
+          )}
         </div>
       </form>
 

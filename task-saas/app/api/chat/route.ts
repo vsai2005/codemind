@@ -25,8 +25,11 @@ import { buildArtifactBytes } from "@/lib/artifacts/build";
 import { enforceRateLimit, acquireGenerationSlot, concurrentGenerationLimit } from "@/lib/rate-limit";
 import { scrubForLog } from "@/lib/ai/failure-classification";
 import { releaseOnStreamEnd } from "@/lib/ai/stream-lifecycle";
+import { buildPlan, planToPromptBlock, type ChatPlan } from "@/lib/ai/planning";
+import { createDataStreamPrefix } from "@/lib/ai/plan-stream";
 import { logger } from "@/lib/logger";
-import type { Prisma } from "@prisma/client";
+// Prisma is used as a value here (Prisma.DbNull), not only as a type.
+import { Prisma } from "@prisma/client";
 import type { ArtifactMetadata, NormalizedArtifact } from "@/lib/artifacts/types";
 
 /**
@@ -351,10 +354,23 @@ export async function POST(req: Request): Promise<Response> {
     // Vision requests stay on the normal chat path so image reasoning is preserved.
     const intent = image ? null : detectArtifactIntent(userText);
 
+    // Planning stage. Runs before generation on a small, targeted slice of context —
+    // the request plus assembled memory, never the full window. Returns null for
+    // trivial asks or on any failure, in which case generation proceeds unplanned.
+    const plan = await buildPlan({
+      userText,
+      contextBlocks: context.contextBlocks,
+      modelId: resolved.descriptor.id,
+    });
+
+    // The plan augments the prompt; the user's original words are still sent verbatim.
+    const plannedPrompt = plan ? `${promptText}${planToPromptBlock(plan)}` : promptText;
+
     if (intent) {
       const artifactResponse = handleArtifactRequest({
         intent: intent.type,
-        promptText,
+        promptText: plannedPrompt,
+        plan,
         contextBlocks: context.contextBlocks,
         conversationId: activeConversationId,
         originalRawContent,
@@ -399,12 +415,12 @@ export async function POST(req: Request): Promise<Response> {
       ? {
           role: "user" as const,
           content: [
-            { type: "text" as const, text: promptText },
+            { type: "text" as const, text: plannedPrompt },
             // Decoded bytes, not a URL: the provider cannot be made to fetch anything.
             { type: "image" as const, image: image.data, mimeType: image.mediaType },
           ],
         }
-      : { role: "user" as const, content: promptText };
+      : { role: "user" as const, content: plannedPrompt };
 
     const startStream = (ctx: ReturnType<typeof buildContext>) =>
       streamText({
@@ -427,6 +443,8 @@ export async function POST(req: Request): Promise<Response> {
               // conversation can mix models without rewriting earlier turns.
               provider: resolved.descriptor.provider,
               model: effectiveProviderModelId,
+              // Persisted so the plan is still there after a reload.
+              plan: plan ? (plan as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
             },
           });
           // Keep the sidebar's "most recent" ordering honest.
@@ -491,9 +509,15 @@ export async function POST(req: Request): Promise<Response> {
       headers: { "x-conversation-id": activeConversationId },
     });
 
+    // The plan is written ahead of the model's own stream so the UI can render it
+    // while generation is still running.
+    const withPlan = plan
+      ? createDataStreamPrefix(streamed, [{ codemindPlan: plan } as never])
+      : streamed;
+
     // Released when the client finishes reading, disconnects, or the stream errors.
     slotHandedToStream = true;
-    return releaseOnStreamEnd(streamed, { onSettled: releaseSlot });
+    return releaseOnStreamEnd(withPlan, { onSettled: releaseSlot });
     } finally {
       // Frees the slot on every path that did NOT hand it to a stream: validation
       // failures, ownership rejections, context overflow, capacity 503s.
@@ -546,6 +570,8 @@ export async function POST(req: Request): Promise<Response> {
 interface ArtifactRequestParams {
   intent: "zip" | "pdf" | "file";
   promptText: string;
+  /** Shown above the artifact card and persisted with the assistant message. */
+  plan: ChatPlan | null;
   contextBlocks: string;
   conversationId: string;
   originalRawContent: string;
@@ -576,6 +602,7 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
   const {
     intent,
     promptText,
+    plan,
     contextBlocks,
     conversationId,
     originalRawContent,
@@ -589,6 +616,8 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
 
   return createArtifactStreamResponse(
     async (writer) => {
+      // Surface the plan immediately: the user sees the approach while generation runs.
+      if (plan) writer.annotate({ codemindPlan: plan } as never);
       writer.progress("planning", "Planning the project…");
       writer.progress("generating", "Generating files…");
 
@@ -618,6 +647,7 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
         await persistTurn(conversationId, originalRawContent, visible, null, {
           provider,
           model: providerModelId,
+          plan,
         });
         writer.text(visible);
         await summarizeDropped(conversationId, existingSummary, droppedMessagesContent);
@@ -650,6 +680,7 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
         await persistTurn(conversationId, originalRawContent, visible, null, {
           provider,
           model: providerModelId,
+          plan,
         });
         writer.text(visible);
         await summarizeDropped(conversationId, existingSummary, droppedMessagesContent);
@@ -661,7 +692,7 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
         originalRawContent,
         generation.summary,
         { artifact: generation.artifact, byteSize: body.byteLength, userId },
-        { provider, model: providerModelId }
+        { provider, model: providerModelId, plan }
       );
 
       writer.progress("ready", "Your download is ready.");
@@ -693,7 +724,7 @@ async function persistTurn(
   userContent: string,
   visibleText: string,
   artifactData: { artifact: NormalizedArtifact; byteSize: number; userId: string } | null,
-  origin?: { provider: string; model: string }
+  origin?: { provider: string; model: string; plan?: ChatPlan | null }
 ): Promise<{ id: string } | null> {
   await prisma.message.create({
     data: { conversationId, role: "user", content: userContent },
@@ -706,6 +737,7 @@ async function persistTurn(
       content: visibleText,
       provider: origin?.provider ?? null,
       model: origin?.model ?? null,
+      plan: origin?.plan ? (origin.plan as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
     },
   });
 

@@ -4,6 +4,9 @@ import { Message } from "ai";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useState } from "react";
+import { CodeBlock } from "./CodeBlock";
+import { CopyButton } from "./CopyButton";
+import { PlanPanel, parsePlan, type ChatPlan } from "./PlanPanel";
 
 /**
  * Artifact rendering.
@@ -123,6 +126,20 @@ function artifactsFromAnnotations(message: Message): ArtifactCardData[] {
   return found;
 }
 
+/** Read the plan the server attached to this message, if any. */
+function planFromAnnotations(message: Message): ChatPlan | null {
+  const annotations = message.annotations;
+  if (!Array.isArray(annotations)) return null;
+
+  for (const annotation of annotations) {
+    if (annotation && typeof annotation === "object" && "codemindPlan" in annotation) {
+      const parsed = parsePlan((annotation as Record<string, unknown>).codemindPlan);
+      if (parsed) return parsed;
+    }
+  }
+  return null;
+}
+
 export function ChatMessage({ message }: { message: Message }): React.ReactElement {
   const isUser = message.role === "user";
   const [exportingId, setExportingId] = useState<string | null>(null);
@@ -228,6 +245,7 @@ export function ChatMessage({ message }: { message: Message }): React.ReactEleme
     }
   }
 
+  const plan = planFromAnnotations(message);
   const annotated = artifactsFromAnnotations(message);
   const legacyArtifacts: ArtifactCardData[] = [];
 
@@ -251,11 +269,20 @@ export function ChatMessage({ message }: { message: Message }): React.ReactEleme
   const artifacts = annotated.length > 0 ? annotated : legacyArtifacts;
 
   return (
-    <div className="flex w-full justify-start mb-6 group relative">
-      <div className="max-w-full w-full">
-        <div className="flex items-center justify-between mb-2">
+    <div className="group relative mb-6 flex w-full justify-start">
+      <div className="w-full max-w-full">
+        <div className="group/header mb-2 flex items-center justify-between">
           <div className="font-bold text-[12px] text-gray-500 tracking-wide uppercase">CodeMind</div>
+          {cleanContent.length > 0 && (
+            // Subtle until hover/focus on desktop; always visible on touch, where
+            // there is no hover to reveal it.
+            <div className="opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100">
+              <CopyButton getText={() => cleanContent} label="Copy" />
+            </div>
+          )}
         </div>
+
+        {plan && <PlanPanel plan={plan} />}
 
         {cleanContent.length > 0 && (
           <div
@@ -271,7 +298,16 @@ export function ChatMessage({ message }: { message: Message }): React.ReactEleme
             prose-ul:list-disc prose-ol:list-decimal prose-li:my-1
             overflow-hidden mb-4"
           >
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{cleanContent}</ReactMarkdown>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                // Fenced blocks get their own header + copy action. Inline `code`
+                // still uses the prose styling above.
+                pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+              }}
+            >
+              {cleanContent}
+            </ReactMarkdown>
           </div>
         )}
 

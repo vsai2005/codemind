@@ -158,6 +158,12 @@ model Message {
   provider String?
   model    String?
 
+  /// User-facing implementation plan shown above the reply (see lib/ai/planning.ts).
+  /// A column rather than a table: it is small, always read with its message, and has
+  /// no independent lifetime. Nullable so unplanned and pre-existing messages stay
+  /// valid. Contains a specification, never model reasoning.
+  plan Json?
+
   artifacts Artifact[]
 
   @@index([conversationId])

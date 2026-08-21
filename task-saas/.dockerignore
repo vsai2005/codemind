@@ -1,9 +1,31 @@
+# Keep secrets and local state out of the build context entirely, so they can
+# never be baked into an image layer even by an accidental `COPY . .`.
+.env
+.env.*
+!.env.example
+
+# Local state and generated output
+node_modules
+.next
+out
+build
+coverage
+backups
+*.log
+*.dump
+*.sql.gz
+
+# VCS and tooling
+.git
+.gitignore
+.vscode
+.idea
+.claude
+
+# Docker itself
 Dockerfile
 .dockerignore
-node_modules
-npm-debug.log
+docker-compose.yml
+
+# Docs
 README.md
-.next
-.git
-.env*.local
-.env

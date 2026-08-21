@@ -26,7 +26,10 @@ services:
     ports:
       - '3000:3000'
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@db:5432/tasksaas?schema=public
+      # Defaults to the bundled Postgres for local use. Set DATABASE_URL in the
+      # environment to point at a managed instance (e.g. Aiven) instead — no code
+      # change needed, and the ?sslmode=require from its console is honoured.
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@db:5432/tasksaas?schema=public}
       AUTH_SECRET: ${AUTH_SECRET}
       AUTH_TRUST_HOST: "true"
       # Demo sign-in. Only enable for an isolated demo host — every visitor
@@ -42,6 +45,13 @@ services:
       NVIDIA_API_KEY_3: ${NVIDIA_API_KEY_3}
       NVIDIA_API_KEY_4: ${NVIDIA_API_KEY_4}
       NVIDIA_API_KEY_5: ${NVIDIA_API_KEY_5}
+      # Optional providers. An absent key just marks that model unavailable.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-}
+      GEMINI_DISPLAY_NAME: ${GEMINI_DISPLAY_NAME:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-}
+      DEEPSEEK_DISPLAY_NAME: ${DEEPSEEK_DISPLAY_NAME:-}
     depends_on:
       db:
         condition: service_healthy
