@@ -1,0 +1,14 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /*
+   * A pasted long line in the composer (or a wide code block in a reply) must never
+   * be able to scroll the page sideways. Vertical scrolling is unaffected.
+   */
+  html,
+  body {
+    overflow-x: hidden;
+  }
+}

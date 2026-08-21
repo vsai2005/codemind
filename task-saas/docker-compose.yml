@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tasksaas
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/tasksaas?schema=public
+      AUTH_SECRET: ${AUTH_SECRET}
+      AUTH_TRUST_HOST: "true"
+      # Demo sign-in. Only enable for an isolated demo host — every visitor
+      # becomes the same shared demo user. See README "Demo authentication".
+      CODEMIND_DEMO_AUTH: ${CODEMIND_DEMO_AUTH:-false}
+      # Empty falls back to the code default (128000). See README "Context limits".
+      AI_CONTEXT_MAX_TOKENS: ${AI_CONTEXT_MAX_TOKENS:-}
+      AI_MAX_OUTPUT_TOKENS: ${AI_MAX_OUTPUT_TOKENS:-}
+      AI_ARTIFACT_MAX_OUTPUT_TOKENS: ${AI_ARTIFACT_MAX_OUTPUT_TOKENS:-}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY}
+      NVIDIA_API_KEY_1: ${NVIDIA_API_KEY_1}
+      NVIDIA_API_KEY_2: ${NVIDIA_API_KEY_2}
+      NVIDIA_API_KEY_3: ${NVIDIA_API_KEY_3}
+      NVIDIA_API_KEY_4: ${NVIDIA_API_KEY_4}
+      NVIDIA_API_KEY_5: ${NVIDIA_API_KEY_5}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:3000']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  postgres_data:

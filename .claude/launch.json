@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "codemind-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "task-saas", "run", "dev"],
+      "port": 3000
+    }
+  ]
+}
