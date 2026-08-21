@@ -109,6 +109,19 @@ model Project {
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 
+  /// Standing instructions applied to every conversation in this project, injected
+  /// through the existing ContextManager rather than a parallel context system.
+  instructions String? @db.Text
+
+  /// Durable project knowledge, grouped by section:
+  ///   [{ "title": "Technology", "items": ["Next.js", "PostgreSQL"] }]
+  /// User-editable and model-neutral — it is not a conversation summary.
+  memory Json?
+
+  /// Archived projects stay fully intact and readable; they are only hidden from
+  /// the default sidebar listing. Archiving is never a soft delete.
+  archivedAt DateTime?
+
   conversations Conversation[]
 
   @@index([userId])

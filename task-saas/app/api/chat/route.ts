@@ -262,11 +262,27 @@ export async function POST(req: Request): Promise<Response> {
     let activeConversationId: string;
     let existingSummary: string | null = null;
 
+    let activeProjectId: string | null = null;
+
     if (!conversationId) {
+      // A projectId from the client is only honoured if the caller owns that project.
+      let projectId: string | null = null;
+      if (parsed.data.projectId) {
+        const owned = await prisma.project.findFirst({
+          where: { id: parsed.data.projectId, userId },
+          select: { id: true },
+        });
+        if (!owned) {
+          return NextResponse.json({ error: "Project not found" }, { status: 404 });
+        }
+        projectId = owned.id;
+      }
+
       const created = await prisma.conversation.create({
-        data: { title: deriveTitle(messages[0].content), userId },
+        data: { title: deriveTitle(messages[0].content), userId, projectId },
       });
       activeConversationId = created.id;
+      activeProjectId = projectId;
     } else {
       const existing = await prisma.conversation.findFirst({
         where: { id: conversationId, userId },
@@ -279,6 +295,7 @@ export async function POST(req: Request): Promise<Response> {
       }
       activeConversationId = existing.id;
       existingSummary = existing.summary;
+      activeProjectId = existing.projectId;
     }
 
     const lastMessage = messages[messages.length - 1];
@@ -328,6 +345,33 @@ export async function POST(req: Request): Promise<Response> {
       );
     }
 
+    // Project workspace context. Scoped by userId as well as id, so a conversation
+    // that somehow referenced another user's project would still read nothing.
+    let projectInstructions: string | null = null;
+    let projectMemory: Array<{ title: string; items: string[] }> | null = null;
+
+    if (activeProjectId) {
+      const project = await prisma.project.findFirst({
+        where: { id: activeProjectId, userId },
+        select: { instructions: true, memory: true },
+      });
+      if (project) {
+        projectInstructions = project.instructions;
+        const raw = project.memory;
+        if (Array.isArray(raw)) {
+          projectMemory = raw.flatMap((entry) => {
+            if (typeof entry !== "object" || entry === null) return [];
+            const section = entry as Record<string, unknown>;
+            if (typeof section.title !== "string") return [];
+            const items = Array.isArray(section.items)
+              ? section.items.filter((i): i is string => typeof i === "string")
+              : [];
+            return items.length > 0 ? [{ title: section.title, items }] : [];
+          });
+        }
+      }
+    }
+
     const buildContext = (maxRecentTurns?: number) =>
       ContextManager.buildContext(historicalMessages, activeUserMessage, existingSummary, {
         hasImage: Boolean(image),
@@ -337,6 +381,8 @@ export async function POST(req: Request): Promise<Response> {
         // rebuilds context against the new model's limits rather than reusing the old.
         contextTokens: resolved.effectiveContextTokens,
         outputTokens: resolved.effectiveOutputTokens,
+        projectInstructions,
+        projectMemory,
       });
 
     let context = buildContext();

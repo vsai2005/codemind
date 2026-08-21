@@ -69,6 +69,11 @@ export const chatRequestSchema = z
     messages: z.array(chatMessageSchema).min(1).max(MAX_MESSAGES_PER_REQUEST),
     conversationId: idSchema.nullish(),
     /**
+     * Workspace for a NEW conversation. Shape-checked here; ownership of the project
+     * is verified server-side before it is ever written.
+     */
+    projectId: idSchema.nullish(),
+    /**
      * CodeMind model id chosen by the user. Shape-checked here only — the registry
      * decides whether it is real. An unregistered id must never reach a provider.
      */

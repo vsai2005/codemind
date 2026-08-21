@@ -33,6 +33,10 @@ const SAFETY_MARGIN_RATIO = 0.02;
 const IMAGE_HEADROOM_TOKENS = 4000;
 
 /** Caps keep any single memory layer from starving the others. */
+/** Workspace context is small by nature; these caps stop a pathological paste. */
+const PROJECT_INSTRUCTIONS_RATIO = 0.05;
+const PROJECT_MEMORY_RATIO = 0.05;
+
 const SUMMARY_BUDGET_RATIO = 0.1;
 const CONVERSATION_RETRIEVAL_RATIO = 0.15;
 const ATTACHMENT_RETRIEVAL_RATIO = 0.15;
@@ -288,6 +292,14 @@ export interface BuildContextOptions {
   contextTokens?: number;
   /** Output reservation for the selected model. Omitted falls back to the env budget. */
   outputTokens?: number;
+  /**
+   * Standing instructions for the project this conversation belongs to. Budgeted
+   * before history because they are the user's own rules for the workspace: losing
+   * them to a long conversation would silently change how CodeMind behaves.
+   */
+  projectInstructions?: string | null;
+  /** Durable project knowledge, rendered as titled sections. */
+  projectMemory?: Array<{ title: string; items: string[] }> | null;
   /** Reserves extra headroom for provider-side image tokens the estimator cannot see. */
   hasImage?: boolean;
   /**
@@ -395,6 +407,41 @@ export class ContextManager {
     budget -= queryTokens;
 
     let contextBlocks = "";
+
+    // --- 2b. Project workspace context -------------------------------------------
+    // Placed ahead of the summary and history so a busy project cannot push the
+    // user's own standing rules out of the window.
+    if (options.projectInstructions && options.projectInstructions.trim().length > 0) {
+      const instructions = clampToTokens(
+        options.projectInstructions.trim(),
+        Math.floor(totalBudget * PROJECT_INSTRUCTIONS_RATIO)
+      );
+      const block = `
+
+--- PROJECT INSTRUCTIONS ---
+These apply to every conversation in this project. Follow them unless the user's current message overrides them.
+${instructions}`;
+      contextBlocks += block;
+      budget -= estimateTokens(block);
+    }
+
+    if (options.projectMemory && options.projectMemory.length > 0) {
+      const rendered = options.projectMemory
+        .filter((section) => section.items.length > 0)
+        .map((section) => `${section.title}: ${section.items.join(", ")}`)
+        .join("\n");
+
+      if (rendered.length > 0) {
+        const memory = clampToTokens(rendered, Math.floor(totalBudget * PROJECT_MEMORY_RATIO));
+        const block = `
+
+--- PROJECT MEMORY ---
+Durable facts about this project:
+${memory}`;
+        contextBlocks += block;
+        budget -= estimateTokens(block);
+      }
+    }
 
     // --- 3. Rolling summary (long-term compressed memory) ------------------------
     if (existingSummary) {

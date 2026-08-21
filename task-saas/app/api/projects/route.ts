@@ -51,20 +51,30 @@ function formatIssues(error: z.ZodError): string {
     .join("; ");
 }
 
-export async function GET(): Promise<Response> {
+export async function GET(request: Request): Promise<Response> {
   try {
     const session = await auth();
     if (!session?.user?.id) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    // Archived projects are hidden from the default listing but never deleted; pass
+    // ?archived=1 to see them. Their conversations and artifacts stay fully intact.
+    const includeArchived = new URL(request.url).searchParams.get("archived") === "1";
+
     const projects = await prisma.project.findMany({
-      where: { userId: session.user.id },
+      where: {
+        userId: session.user.id,
+        ...(includeArchived ? {} : { archivedAt: null }),
+      },
       orderBy: { updatedAt: "desc" },
       select: {
         id: true,
         name: true,
         description: true,
+        instructions: true,
+        memory: true,
+        archivedAt: true,
         createdAt: true,
         updatedAt: true,
         _count: { select: { conversations: true } },
@@ -125,7 +135,8 @@ export async function POST(request: Request): Promise<Response> {
       },
     });
 
-    return NextResponse.json(project, { status: 201 });
+    // Wrapped to match GET /api/projects/[id] and PATCH, which both return { project }.
+    return NextResponse.json({ project }, { status: 201 });
   } catch (error) {
     logger.error("Failed to create project", {
       error: error instanceof Error ? error.message : "unknown",

@@ -6,6 +6,7 @@ import { ChatMessage } from "@/components/chat/ChatMessage";
 import { Composer } from "@/components/chat/Composer";
 import { ThinkingIndicator } from "@/components/chat/ThinkingIndicator";
 import { ModelSelector } from "@/components/chat/ModelSelector";
+import { ProjectSwitcher } from "@/components/projects/ProjectSwitcher";
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { Message, type JSONValue } from "ai";
@@ -58,6 +59,7 @@ export default function ChatPage() {
   // Applies to the NEXT generation. Null means "use the server default".
   const [modelId, setModelId] = useState<string | null>(null);
   const [stopped, setStopped] = useState(false);
+  const [projectId, setProjectId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,6 +68,7 @@ export default function ChatPage() {
       .then((res) => res.json())
       .then((data) => {
         if (cancelled) return;
+        if (typeof data?.projectId === "string") setProjectId(data.projectId);
         if (Array.isArray(data?.messages)) {
           setInitialMessages(data.messages.map(toMessage));
         }
@@ -135,6 +138,7 @@ export default function ChatPage() {
             CodeMind Workspace
           </h1>
           <div className="flex items-center gap-2">
+            <ProjectSwitcher activeProjectId={projectId} />
             <ModelSelector value={modelId} onChange={setModelId} disabled={isLoading} />
           </div>
         </header>

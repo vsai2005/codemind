@@ -2,11 +2,13 @@
 
 import { useChat } from "ai/react";
 import { useCallback, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { ChatMessage } from "@/components/chat/ChatMessage";
 import { Composer } from "@/components/chat/Composer";
 import { ThinkingIndicator } from "@/components/chat/ThinkingIndicator";
 import { ModelSelector } from "@/components/chat/ModelSelector";
+import { ProjectSwitcher } from "@/components/projects/ProjectSwitcher";
 
 export default function DashboardPage() {
   // Applies to the NEXT generation. Null means "use the server default".
@@ -14,12 +16,17 @@ export default function DashboardPage() {
 
   const [stopped, setStopped] = useState(false);
 
+  // A chat started from a project workspace arrives as ?project=<id>. The server
+  // re-checks ownership before filing the conversation, so this is a hint, not a grant.
+  const searchParams = useSearchParams();
+  const projectId = searchParams.get("project");
+
   const { messages, input, handleInputChange, handleSubmit, isLoading, append, data, setData, stop } =
     useChat({
       api: "/api/chat",
       // Read at request time, so switching models takes effect on the next message
       // without remounting the chat or losing any history.
-      body: { model: modelId },
+      body: { model: modelId, projectId },
       onResponse: (response) => {
         const id = response.headers.get("x-conversation-id");
         if (id) {
@@ -61,6 +68,7 @@ export default function DashboardPage() {
         <header className="h-14 border-b border-gray-200 flex items-center px-4 md:px-6 justify-between bg-white z-10 shrink-0">
           <h1 className="font-semibold text-[15px] text-gray-900 tracking-tight">CodeMind Workspace</h1>
           <div className="flex items-center gap-2">
+            <ProjectSwitcher activeProjectId={projectId} />
             <ModelSelector value={modelId} onChange={setModelId} disabled={isLoading} />
           </div>
         </header>

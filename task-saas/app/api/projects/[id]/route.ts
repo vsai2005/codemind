@@ -2,6 +2,8 @@ import { z } from "zod";
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/db";
+// Prisma is used as a value here (Prisma.DbNull), not only as a type.
+import { Prisma } from "@prisma/client";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { logger } from "@/lib/logger";
 
@@ -40,19 +42,50 @@ function formatIssues(error: z.ZodError): string {
     .join("; ");
 }
 
+/** Standing instructions applied to every conversation in the project. */
+const instructionsSchema = z
+  .string()
+  .trim()
+  .max(20000, "instructions must be 20000 characters or fewer")
+  .nullable();
+
+/** Durable, user-editable project knowledge. Shape is validated, content is not. */
+const memorySchema = z
+  .array(
+    z.object({
+      title: z.string().trim().min(1).max(120),
+      items: z.array(z.string().trim().min(1).max(500)).max(50),
+    })
+  )
+  .max(20)
+  .nullable();
+
 const updateProjectSchema = z
   .object({
     name: nameSchema.optional(),
     description: descriptionSchema.optional(),
+    instructions: instructionsSchema.optional(),
+    memory: memorySchema.optional(),
+    /** true archives, false restores. Archiving never deletes anything. */
+    archived: z.boolean().optional(),
   })
-  .refine((data) => data.name !== undefined || data.description !== undefined, {
-    message: "provide at least one of name or description",
-  });
+  .refine(
+    (data) =>
+      data.name !== undefined ||
+      data.description !== undefined ||
+      data.instructions !== undefined ||
+      data.memory !== undefined ||
+      data.archived !== undefined,
+    { message: "provide at least one field to update" }
+  );
 
 const projectSelect = {
   id: true,
   name: true,
   description: true,
+  instructions: true,
+  memory: true,
+  archivedAt: true,
   createdAt: true,
   updatedAt: true,
   _count: { select: { conversations: true } },
@@ -77,7 +110,7 @@ export async function GET(
       return NextResponse.json({ error: "Not Found" }, { status: 404 });
     }
 
-    return NextResponse.json(project);
+    return NextResponse.json({ project });
   } catch (error) {
     logger.error("Failed to fetch project", {
       projectId: params.id,
@@ -118,9 +151,21 @@ export async function PATCH(
 
     // Only the keys the client actually sent are written, so a partial PATCH cannot
     // blank a field it never mentioned.
-    const data: { name?: string; description?: string | null } = {};
+    const data: Prisma.ProjectUpdateManyMutationInput = {};
     if (parsed.data.name !== undefined) data.name = parsed.data.name;
     if (parsed.data.description !== undefined) data.description = parsed.data.description;
+    if (parsed.data.instructions !== undefined) data.instructions = parsed.data.instructions;
+    if (parsed.data.memory !== undefined) {
+      // Prisma distinguishes SQL NULL from JSON null; DbNull clears the column.
+      data.memory =
+        parsed.data.memory === null
+          ? Prisma.DbNull
+          : (parsed.data.memory as unknown as Prisma.InputJsonValue);
+    }
+    if (parsed.data.archived !== undefined) {
+      // Archiving is presentation-only: conversations and artifacts are untouched.
+      data.archivedAt = parsed.data.archived ? new Date() : null;
+    }
 
     // Ownership is enforced by the update filter itself.
     const result = await prisma.project.updateMany({
@@ -141,7 +186,7 @@ export async function PATCH(
       return NextResponse.json({ error: "Not Found" }, { status: 404 });
     }
 
-    return NextResponse.json(project);
+    return NextResponse.json({ project });
   } catch (error) {
     logger.error("Failed to update project", {
       projectId: params.id,
