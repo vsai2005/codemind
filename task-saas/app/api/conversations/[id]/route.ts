@@ -3,6 +3,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/db";
 import { NextResponse } from "next/server";
 import { logger } from "@/lib/logger";
+import { enforceBodyLimit } from "@/lib/http/body-limit";
 
 /**
  * Conversation detail.
@@ -82,6 +83,8 @@ export async function PATCH(
 
     let raw: unknown;
     try {
+      const oversized = enforceBodyLimit(req, "json");
+      if (oversized) return oversized;
       raw = await req.json();
     } catch {
       return NextResponse.json({ error: "Invalid JSON in request body" }, { status: 400 });

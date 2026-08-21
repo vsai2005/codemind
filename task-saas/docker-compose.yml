@@ -5,15 +5,25 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: tasksaas
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      # No default. Compose fails to start rather than silently running the database
+      # with a guessable password; set it in .env alongside your other secrets.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-tasksaas}
+    # Bound to the loopback interface, NOT 0.0.0.0.
+    #
+    # The app container reaches the database over the compose network and never uses
+    # this mapping; it exists only so psql and Prisma Studio can connect from the host.
+    # Published as '5432:5432' it was reachable from anything on the same LAN, which on
+    # a machine you browse to from a phone is every device on the network.
+    #
+    # Remove this block entirely if you do not need host access.
     ports:
-      - '5432:5432'
+      - '127.0.0.1:5432:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-postgres}']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -26,16 +36,22 @@ services:
     ports:
       - '3000:3000'
     environment:
-      # Defaults to the bundled Postgres for local use. Set DATABASE_URL in the
-      # environment to point at a managed instance (e.g. Aiven) instead — no code
-      # change needed, and the ?sslmode=require from its console is honoured.
-      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@db:5432/tasksaas?schema=public}
-      AUTH_SECRET: ${AUTH_SECRET}
+      # Defaults to the bundled Postgres for local use, using the same credentials the
+      # db service was started with. Set DATABASE_URL in the environment to point at a
+      # managed instance (e.g. Aiven) instead — no code change needed, and the
+      # ?sslmode=require from its console is honoured.
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-tasksaas}?schema=public}
+      AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET in .env (npx auth secret)}
       AUTH_TRUST_HOST: "true"
       # Demo sign-in. Only enable for an isolated demo host — every visitor
       # becomes the same shared demo user. See README "Demo authentication".
       CODEMIND_DEMO_AUTH: ${CODEMIND_DEMO_AUTH:-false}
-      # Empty falls back to the code default (128000). See README "Context limits".
+      # Number of reverse proxies you operate in front of this app. 0 (the default)
+      # ignores x-forwarded-for entirely, so a forged header cannot mint a fresh
+      # rate-limit bucket. See README "Rate limits".
+      CODEMIND_TRUSTED_PROXY_HOPS: ${CODEMIND_TRUSTED_PROXY_HOPS:-0}
+      # Empty falls back to the shipped defaults in lib/env.ts — 512,000 context and
+      # 16,384 output. Set these only to override. See README "Context limits".
       AI_CONTEXT_MAX_TOKENS: ${AI_CONTEXT_MAX_TOKENS:-}
       AI_MAX_OUTPUT_TOKENS: ${AI_MAX_OUTPUT_TOKENS:-}
       AI_ARTIFACT_MAX_OUTPUT_TOKENS: ${AI_ARTIFACT_MAX_OUTPUT_TOKENS:-}

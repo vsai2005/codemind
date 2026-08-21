@@ -1,5 +1,6 @@
 import { Message } from "ai";
 import { ATTACHMENT_TAG_RE } from "@/lib/attachments";
+import { getContextTokenLimit, getOutputTokenLimit } from "@/lib/env";
 
 /**
  * Context Management V3
@@ -13,9 +14,6 @@ import { ATTACHMENT_TAG_RE } from "@/lib/attachments";
  * None replaces another. PostgreSQL remains the source of truth; nothing here
  * deletes history, it only chooses what the model sees this turn.
  */
-
-const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
-const DEFAULT_MAX_CONTEXT_TOKENS = 128000;
 
 /** Flat reserve for the base persona prompt. */
 const SYSTEM_PROMPT_RESERVE = 300;
@@ -46,23 +44,12 @@ const RETRIEVED_MESSAGE_MAX_CHARS = 1200;
 const MAX_ATTACHMENT_CHUNKS = 5;
 const ATTACHMENT_CHUNK_SIZE = 1500;
 
-export function getOutputTokenLimit(): number {
-  const envVal = process.env.AI_MAX_OUTPUT_TOKENS;
-  if (envVal) {
-    const parsed = parseInt(envVal, 10);
-    if (!isNaN(parsed) && parsed > 0) return parsed;
-  }
-  return DEFAULT_MAX_OUTPUT_TOKENS;
-}
-
-export function getContextTokenLimit(): number {
-  const envVal = process.env.AI_CONTEXT_MAX_TOKENS;
-  if (envVal) {
-    const parsed = parseInt(envVal, 10);
-    if (!isNaN(parsed) && parsed > 0) return parsed;
-  }
-  return DEFAULT_MAX_CONTEXT_TOKENS;
-}
+/**
+ * Token limits come from the validated runtime configuration in lib/env.ts, which is
+ * the only place the environment is read and the only place a default is defined.
+ * Re-exported here so existing importers keep their import path.
+ */
+export { getContextTokenLimit, getOutputTokenLimit };
 
 // ---------------------------------------------------------------------------
 // Token estimation
@@ -325,9 +312,26 @@ export interface BuildContextResult {
   retrievedMessageIds: string[];
 }
 
+/** Narrow an unknown JSON value to something with string-keyed properties. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The minimum shape `buildContext` needs from a stored message.
+ *
+ * Structural rather than Prisma's generated row type: the artifact pipeline and the
+ * tests pass plain objects, and this function only ever reads these three fields.
+ */
+export interface HistoricalMessage {
+  id?: string;
+  role: string;
+  content: unknown;
+}
+
 export class ContextManager {
   static buildContext(
-    historicalMessages: any[],
+    historicalMessages: HistoricalMessage[],
     newUserMessage: Message,
     existingSummary: string | null,
     options: BuildContextOptions = {}
@@ -353,17 +357,21 @@ export class ContextManager {
     const cleanHistory: Message[] = [];
 
     for (const msg of historicalMessages) {
-      let content = msg.content;
-      if (typeof content !== "string") continue;
+      if (typeof msg.content !== "string") continue;
+      let content: string = msg.content;
 
       const match = content.match(ATTACHMENT_TAG_RE);
       if (match) {
         try {
-          const meta = JSON.parse(match[1]);
-          const docAttachments = meta.attachments?.filter((a: any) => a.type === "document") || [];
-          for (const doc of docAttachments) {
-            if (doc.extractedText) {
-              allDocs.push({ name: doc.name, content: doc.extractedText });
+          const meta: unknown = JSON.parse(match[1]);
+          const entries =
+            isRecord(meta) && Array.isArray(meta.attachments) ? meta.attachments : [];
+          for (const entry of entries) {
+            if (!isRecord(entry) || entry.type !== "document") continue;
+            const extractedText = entry.extractedText;
+            if (typeof extractedText === "string" && extractedText.length > 0) {
+              const name = typeof entry.name === "string" ? entry.name : "attachment";
+              allDocs.push({ name, content: extractedText });
             }
           }
           content = content.replace(ATTACHMENT_TAG_RE, "").trim();
@@ -373,7 +381,7 @@ export class ContextManager {
       }
 
       cleanHistory.push({
-        id: msg.id,
+        id: msg.id ?? "",
         role:
           msg.role === "system"
             ? "system"
@@ -411,18 +419,27 @@ export class ContextManager {
     // --- 2b. Project workspace context -------------------------------------------
     // Placed ahead of the summary and history so a busy project cannot push the
     // user's own standing rules out of the window.
+    //
+    // Each block is bounded by BOTH its share of the total budget and whatever is
+    // actually left, and the wrapper text is charged against that same allowance. A
+    // ratio-only cap was not enough: when the current message has already consumed
+    // most of the window, `budget` went negative and the assembled prompt exceeded
+    // the model's context limit by up to the size of these two blocks.
     if (options.projectInstructions && options.projectInstructions.trim().length > 0) {
-      const instructions = clampToTokens(
-        options.projectInstructions.trim(),
-        Math.floor(totalBudget * PROJECT_INSTRUCTIONS_RATIO)
-      );
-      const block = `
+      const header = `
 
 --- PROJECT INSTRUCTIONS ---
 These apply to every conversation in this project. Follow them unless the user's current message overrides them.
-${instructions}`;
-      contextBlocks += block;
-      budget -= estimateTokens(block);
+`;
+      const allowance =
+        Math.min(Math.floor(totalBudget * PROJECT_INSTRUCTIONS_RATIO), Math.max(0, budget)) -
+        estimateTokens(header);
+      const instructions = clampToTokens(options.projectInstructions.trim(), allowance);
+      if (instructions.length > 0) {
+        const block = `${header}${instructions}`;
+        contextBlocks += block;
+        budget -= estimateTokens(block);
+      }
     }
 
     if (options.projectMemory && options.projectMemory.length > 0) {
@@ -432,14 +449,20 @@ ${instructions}`;
         .join("\n");
 
       if (rendered.length > 0) {
-        const memory = clampToTokens(rendered, Math.floor(totalBudget * PROJECT_MEMORY_RATIO));
-        const block = `
+        const header = `
 
 --- PROJECT MEMORY ---
 Durable facts about this project:
-${memory}`;
-        contextBlocks += block;
-        budget -= estimateTokens(block);
+`;
+        const allowance =
+          Math.min(Math.floor(totalBudget * PROJECT_MEMORY_RATIO), Math.max(0, budget)) -
+          estimateTokens(header);
+        const memory = clampToTokens(rendered, allowance);
+        if (memory.length > 0) {
+          const block = `${header}${memory}`;
+          contextBlocks += block;
+          budget -= estimateTokens(block);
+        }
       }
     }
 

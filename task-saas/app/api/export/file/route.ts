@@ -7,6 +7,7 @@ import { validateArtifact } from "@/lib/artifacts/validate";
 import { contentDisposition, validateArtifactFilename } from "@/lib/artifacts/paths";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { logger } from "@/lib/logger";
+import { enforceBodyLimit } from "@/lib/http/body-limit";
 
 /**
  * Legacy single-file export. See app/api/export/zip/route.ts for why this remains.
@@ -30,6 +31,8 @@ export async function POST(req: Request): Promise<Response> {
 
     let raw: unknown;
     try {
+      const oversized = enforceBodyLimit(req, "json");
+      if (oversized) return oversized;
       raw = await req.json();
     } catch {
       return NextResponse.json({ error: "Invalid JSON in request body" }, { status: 400 });

@@ -1,10 +1,19 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { AccountMenu } from "@/components/auth/AccountMenu";
 import { NewProjectDialog } from "@/components/projects/NewProjectDialog";
+import {
+  BACKGROUND_REFRESH_MS,
+  getWorkspaceServerSnapshot,
+  getWorkspaceSnapshot,
+  invalidateWorkspace,
+  patchWorkspaceSnapshot,
+  refreshWorkspace,
+  subscribeToWorkspace,
+} from "@/lib/client/workspace-data";
 
 /**
  * Primary navigation.
@@ -15,20 +24,19 @@ import { NewProjectDialog } from "@/components/projects/NewProjectDialog";
  * first-class home, not a leftover bucket.
  *
  * Both sections collapse so a user with many projects can keep the rail readable.
+ *
+ * Archived projects get their own disclosure below the active list. Archiving hides a
+ * project; it has never deleted anything, and this is the way back — without it the
+ * only route to an archived project was a URL the user had to have kept.
+ *
+ * Data comes from the shared workspace store rather than a private poll, so the
+ * switcher in the chat header reads the same cache and mutations refresh both at once.
  */
 
-interface SidebarProject {
+interface ArchivedProject {
   id: string;
   name: string;
 }
-
-interface SidebarConversation {
-  id: string;
-  title: string | null;
-  projectId: string | null;
-}
-
-const POLL_INTERVAL_MS = 5000;
 
 function ChevronIcon({ open }: { open: boolean }): React.ReactElement {
   return (
@@ -79,72 +87,99 @@ function SectionHeader({
 }
 
 export function Sidebar(): React.ReactElement {
-  const [projects, setProjects] = useState<SidebarProject[]>([]);
-  const [conversations, setConversations] = useState<SidebarConversation[]>([]);
+  const { projects, conversations, loaded } = useSyncExternalStore(
+    subscribeToWorkspace,
+    getWorkspaceSnapshot,
+    getWorkspaceServerSnapshot
+  );
+
   const [projectsOpen, setProjectsOpen] = useState(true);
   const [chatsOpen, setChatsOpen] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [loaded, setLoaded] = useState(false);
+
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  const [archived, setArchived] = useState<ArchivedProject[]>([]);
+  const [archivedLoaded, setArchivedLoaded] = useState(false);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
 
   const router = useRouter();
   const pathname = usePathname();
 
-  const refresh = useCallback(async () => {
+  // One initial load, a focus listener for changes made elsewhere, and a slow
+  // safety-net interval that does nothing while the tab is hidden.
+  useEffect(() => {
+    void refreshWorkspace();
+
+    const onFocus = (): void => {
+      if (document.visibilityState === "visible") void refreshWorkspace();
+    };
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+
+    const interval = setInterval(() => {
+      if (document.visibilityState === "visible") void refreshWorkspace();
+    }, BACKGROUND_REFRESH_MS);
+
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+      clearInterval(interval);
+    };
+  }, []);
+
+  const loadArchived = useCallback(async () => {
     try {
-      const [projectsRes, conversationsRes] = await Promise.all([
-        fetch("/api/projects"),
-        fetch("/api/conversations"),
-      ]);
+      const response = await fetch("/api/projects?archived=1");
+      if (!response.ok) return;
+      const body: unknown = await response.json();
+      const list = Array.isArray(body) ? body : (body as { projects?: unknown }).projects;
+      if (!Array.isArray(list)) return;
 
-      if (projectsRes.ok) {
-        const body: unknown = await projectsRes.json();
-        const list = Array.isArray(body)
-          ? body
-          : (body as { projects?: unknown }).projects;
-        if (Array.isArray(list)) {
-          setProjects(
-            list.flatMap((p): SidebarProject[] => {
-              if (typeof p !== "object" || p === null) return [];
-              const row = p as Record<string, unknown>;
-              return typeof row.id === "string" && typeof row.name === "string"
-                ? [{ id: row.id, name: row.name }]
-                : [];
-            })
-          );
-        }
-      }
-
-      if (conversationsRes.ok) {
-        const body: unknown = await conversationsRes.json();
-        if (Array.isArray(body)) {
-          setConversations(
-            body.flatMap((c): SidebarConversation[] => {
-              if (typeof c !== "object" || c === null) return [];
-              const row = c as Record<string, unknown>;
-              if (typeof row.id !== "string") return [];
-              return [
-                {
-                  id: row.id,
-                  title: typeof row.title === "string" ? row.title : null,
-                  projectId: typeof row.projectId === "string" ? row.projectId : null,
-                },
-              ];
-            })
-          );
-        }
-      }
+      setArchived(
+        list.flatMap((entry): ArchivedProject[] => {
+          if (typeof entry !== "object" || entry === null) return [];
+          const row = entry as Record<string, unknown>;
+          // ?archived=1 returns active projects too; only the archived ones belong here.
+          if (typeof row.archivedAt !== "string") return [];
+          return typeof row.id === "string" && typeof row.name === "string"
+            ? [{ id: row.id, name: row.name }]
+            : [];
+        })
+      );
     } catch {
-      // A transient poll failure should never blank the navigation.
+      // Leave whatever was already listed; the disclosure simply shows nothing new.
     } finally {
-      setLoaded(true);
+      setArchivedLoaded(true);
     }
   }, []);
 
+  // Fetched only when the user opens the disclosure — archived projects are rare and
+  // should not cost a request on every page load.
   useEffect(() => {
-    void refresh();
-    const interval = setInterval(() => void refresh(), POLL_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [refresh]);
+    if (archivedOpen) void loadArchived();
+  }, [archivedOpen, loadArchived]);
+
+  const restoreProject = async (id: string): Promise<void> => {
+    if (restoringId) return;
+    setRestoringId(id);
+    try {
+      const response = await fetch(`/api/projects/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ archived: false }),
+      });
+      if (!response.ok) return;
+
+      setArchived((current) => current.filter((project) => project.id !== id));
+      invalidateWorkspace();
+      router.push(`/projects/${id}`);
+    } catch {
+      // Nothing was changed server-side; the row stays in the archived list.
+    } finally {
+      setRestoringId(null);
+    }
+  };
 
   const deleteConversation = async (id: string, event: React.MouseEvent): Promise<void> => {
     event.preventDefault();
@@ -152,7 +187,15 @@ export function Sidebar(): React.ReactElement {
     if (!confirm("Delete this conversation?")) return;
 
     await fetch(`/api/conversations/${id}`, { method: "DELETE" });
-    setConversations((current) => current.filter((c) => c.id !== id));
+
+    // Optimistic, then reconciled: the row disappears on click rather than after the
+    // next refresh.
+    patchWorkspaceSnapshot((current) => ({
+      ...current,
+      conversations: current.conversations.filter((c) => c.id !== id),
+    }));
+    invalidateWorkspace();
+
     if (pathname === `/chat/${id}`) router.push("/dashboard");
   };
 
@@ -231,6 +274,53 @@ export function Sidebar(): React.ReactElement {
                   Create your first project
                 </button>
               )}
+
+              {/* --- Archived ------------------------------------------- */}
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => setArchivedOpen((v) => !v)}
+                  aria-expanded={archivedOpen}
+                  className="flex w-full items-center gap-1.5 rounded-[6px] px-2 py-[5px] text-left text-[12px] text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                >
+                  <ChevronIcon open={archivedOpen} />
+                  <span>Archived</span>
+                  {archivedOpen && archivedLoaded && archived.length > 0 && (
+                    <span className="ml-auto tabular-nums text-gray-400">{archived.length}</span>
+                  )}
+                </button>
+
+                {archivedOpen && (
+                  <div className="mt-[2px] space-y-[2px]">
+                    {archived.map((project) => (
+                      <div
+                        key={project.id}
+                        className="group flex items-center justify-between rounded-[6px] hover:bg-gray-100"
+                      >
+                        <Link
+                          href={`/projects/${project.id}`}
+                          className="min-w-0 flex-1 truncate px-2 py-[6px] text-[13px] text-gray-500"
+                        >
+                          {project.name}
+                        </Link>
+                        <button
+                          type="button"
+                          onClick={() => void restoreProject(project.id)}
+                          disabled={restoringId === project.id}
+                          title="Restore this project to the sidebar"
+                          className="mr-1 shrink-0 rounded-[4px] px-1.5 py-[3px] text-[11px] font-medium text-gray-500 transition-colors hover:bg-white hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
+                        >
+                          {restoringId === project.id ? "Restoring…" : "Restore"}
+                        </button>
+                      </div>
+                    ))}
+
+                    {archivedLoaded && archived.length === 0 && (
+                      <p className="px-2 py-1 text-[12px] text-gray-400">No archived projects</p>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -286,7 +376,7 @@ export function Sidebar(): React.ReactElement {
         open={dialogOpen}
         onClose={() => setDialogOpen(false)}
         onCreated={(project) => {
-          setProjects((current) => [{ id: project.id, name: project.name }, ...current]);
+          invalidateWorkspace();
           router.push(`/projects/${project.id}`);
         }}
       />

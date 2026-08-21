@@ -6,6 +6,7 @@ import { prisma } from "@/lib/db";
 import { Prisma } from "@prisma/client";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { logger } from "@/lib/logger";
+import { enforceBodyLimit } from "@/lib/http/body-limit";
 
 /**
  * Project detail.
@@ -136,6 +137,8 @@ export async function PATCH(
 
     let raw: unknown;
     try {
+      const oversized = enforceBodyLimit(request, "projectSettings");
+      if (oversized) return oversized;
       raw = await request.json();
     } catch {
       return NextResponse.json({ error: "Invalid JSON in request body" }, { status: 400 });

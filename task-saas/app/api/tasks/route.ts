@@ -6,6 +6,7 @@ import {
   getAuthenticatedUserId,
 } from "@/lib/api-utils";
 import type { TaskStatus, TaskPriority } from "@prisma/client";
+import { enforceBodyLimit } from "@/lib/http/body-limit";
 
 export async function GET(request: Request): Promise<Response> {
   const userId = await getAuthenticatedUserId();
@@ -50,6 +51,8 @@ export async function POST(request: Request): Promise<Response> {
 
   let body: unknown;
   try {
+    const oversized = enforceBodyLimit(request, "json");
+    if (oversized) return oversized;
     body = await request.json();
   } catch {
     return errorResponse("INVALID_JSON", "Invalid JSON in request body", 400);

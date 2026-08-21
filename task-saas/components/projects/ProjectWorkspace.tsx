@@ -712,12 +712,17 @@ export function ProjectWorkspace({ projectId }: { projectId: string }): React.Re
   // bytes never round-trip through component state.
   const downloadArtifact = async (artifact: ProjectArtifact): Promise<void> => {
     setDownloadingId(artifact.id);
+    setActionError(null);
     try {
       const response = await fetch(`/api/artifacts/${artifact.id}/download`);
       if (!response.ok) {
         const detail = await response.json().catch(() => null);
         const record = asRecord(detail);
-        alert(asString(record?.error) ?? "Failed to download this artifact.");
+        // Reported inline through the panel's existing status line rather than a
+        // browser alert(), which was the only modal dialog left in the workspace.
+        setActionError(
+          asString(record?.error) ?? `Could not download ${artifact.filename}. Please try again.`
+        );
         return;
       }
 
@@ -731,7 +736,7 @@ export function ProjectWorkspace({ projectId }: { projectId: string }): React.Re
       document.body.removeChild(anchor);
       window.URL.revokeObjectURL(url);
     } catch {
-      alert("Failed to download this artifact.");
+      setActionError(`Could not download ${artifact.filename}. Please check your connection and try again.`);
     } finally {
       if (aliveRef.current) setDownloadingId(null);
     }
@@ -874,17 +879,18 @@ export function ProjectWorkspace({ projectId }: { projectId: string }): React.Re
         tabIndex={0}
         className="mt-5 focus:outline-none"
       >
+        {/* Lifted out of the chats tab: downloads live in Files and report here too. */}
+        {actionError && (
+          <p
+            role="status"
+            className="mb-3 break-words rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-[13px] text-gray-600"
+          >
+            {actionError}
+          </p>
+        )}
+
         {activeTab === "chats" && (
           <>
-            {actionError && (
-              <p
-                role="status"
-                className="mb-3 break-words rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-[13px] text-gray-600"
-              >
-                {actionError}
-              </p>
-            )}
-
             {(conversations.status === "idle" || conversations.status === "loading") && (
               <RowSkeleton />
             )}

@@ -4,6 +4,13 @@ const nextConfig = {
 
   experimental: {
     /**
+     * Runs instrumentation.ts once at server startup, which is where environment
+     * validation lives. Without this the hook is never called and a misconfigured
+     * deployment boots successfully and fails at the first request that needs config.
+     */
+    instrumentationHook: true,
+
+    /**
      * pdfkit must NOT be bundled by webpack.
      *
      * It loads Adobe Font Metric files (Helvetica.afm and friends) from disk at runtime

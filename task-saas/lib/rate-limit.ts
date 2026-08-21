@@ -12,6 +12,8 @@
  * development / load testing only).
  */
 
+import { trustedProxyHops } from "@/lib/env";
+
 export interface RateLimitRule {
   limit: number;
   windowMs: number;
@@ -32,6 +34,38 @@ export const RATE_LIMITS = {
   download: { limit: 60, windowMs: 60_000 },
   /** Project CRUD — cheap DB writes, but still worth bounding. */
   projects: { limit: 60, windowMs: 60_000 },
+
+  /**
+   * Sign-in attempts for ONE account, keyed by submitted email.
+   *
+   * This is the bucket that stops password guessing: an attacker targeting an account
+   * cannot escape it by changing address or clearing cookies. Ten attempts in five
+   * minutes is far above normal mistyping and far below anything useful for a guess.
+   *
+   * It is deliberately not a lockout — the window rolls, so a legitimate user is
+   * delayed at worst and never permanently locked out of their own account.
+   */
+  authAccount: { limit: 10, windowMs: 300_000 },
+
+  /**
+   * Sign-in attempts from one source, keyed by client IP where a trusted proxy makes
+   * one available and otherwise shared across all unauthenticated traffic. Bounds
+   * total scrypt work — each verification costs ~16MB and ~100ms, so this is what
+   * keeps sign-in from being a cheap CPU and memory exhaustion vector.
+   *
+   * Sized for the shared case: 60/minute caps scrypt at roughly 10% of one core while
+   * staying far above what a real user base generates. The per-account bucket above is
+   * what actually stops guessing; this one only stops the machine falling over.
+   */
+  authSource: { limit: 60, windowMs: 60_000 },
+
+  /**
+   * POST /api/auth/register — account creation, far rarer than sign-in.
+   *
+   * Also sized for the shared case, since registration has no session to key on. Set
+   * CODEMIND_TRUSTED_PROXY_HOPS to make this per-IP instead of global.
+   */
+  register: { limit: 20, windowMs: 3_600_000 },
 } as const satisfies Record<string, RateLimitRule>;
 
 export type RateLimitBucket = keyof typeof RATE_LIMITS;
@@ -67,18 +101,59 @@ function isDisabled(): boolean {
 }
 
 /**
- * Stable identity for a requester. Prefers the authenticated user id; falls back to
- * the proxy-forwarded client IP for unauthenticated traffic.
+ * The client IP, or null when no trustworthy one can be established.
  *
- * Note: the IP fallback trusts `x-forwarded-for`, which is only meaningful behind a
- * trusted proxy. Authenticated routes always pass a userId, so the fallback is a
- * best-effort backstop rather than a security control.
+ * `x-forwarded-for` is written by the client and appended to by each proxy, so the
+ * only entries worth believing are the ones added by proxies you operate. Reading the
+ * LEFTMOST entry — the previous behaviour — reads exactly the part the client wrote,
+ * which let a requester mint a fresh rate-limit bucket per request just by varying a
+ * header.
+ *
+ * `CODEMIND_TRUSTED_PROXY_HOPS` states how many proxies sit in front of this app. We
+ * count that many entries in from the RIGHT. With the default of 0 the header is
+ * ignored entirely: an unconfigured deployment cannot be tricked into trusting a
+ * forged address, and callers fall back to a shared bucket instead.
+ */
+export function clientIp(request: Request): string | null {
+  const hops = trustedProxyHops();
+  if (hops <= 0) return null;
+
+  const forwarded = request.headers.get("x-forwarded-for");
+  if (forwarded) {
+    const parts = forwarded
+      .split(",")
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0);
+    const index = parts.length - hops;
+    if (index >= 0 && index < parts.length) return parts[index];
+    // Fewer entries than configured hops: the chain is not what we were told it is.
+    return null;
+  }
+
+  // Set by a single proxy directly in front of the app; only meaningful for one hop.
+  if (hops === 1) {
+    const real = request.headers.get("x-real-ip")?.trim();
+    if (real) return real;
+  }
+
+  return null;
+}
+
+/**
+ * Stable identity for a requester. Prefers the authenticated user id, which is the
+ * only identity that is not client-controlled.
+ *
+ * When there is no session and no trusted proxy, every unauthenticated requester
+ * shares the `source:untrusted` bucket. That is intentional: a shared limit is a
+ * denial-of-service risk, but a forgeable per-request limit is no limit at all. Routes
+ * that need real protection without a session — sign-in, registration — additionally
+ * key on the submitted email, which is the thing being attacked and cannot be varied
+ * freely by an attacker targeting one account.
  */
 export function identifyRequester(request: Request, userId?: string | null): string {
   if (userId) return `user:${userId}`;
-  const forwarded = request.headers.get("x-forwarded-for");
-  const ip = forwarded?.split(",")[0]?.trim() || request.headers.get("x-real-ip") || "unknown";
-  return `ip:${ip}`;
+  const ip = clientIp(request);
+  return ip ? `ip:${ip}` : "source:untrusted";
 }
 
 export function checkRateLimit(
@@ -125,6 +200,39 @@ export function checkRateLimit(
     remaining,
     resetAt: existing.resetAt,
     retryAfterSeconds: ok ? 0 : Math.max(1, Math.ceil((existing.resetAt - now) / 1000)),
+  };
+}
+
+/**
+ * Consume one sign-in attempt.
+ *
+ * Two buckets, deliberately:
+ *
+ *   authAccount  keyed on the submitted email — stops guessing at one account, and
+ *                cannot be escaped by rotating IP or clearing cookies
+ *   authSource   keyed on the requester — bounds total scrypt work, which is the
+ *                CPU/memory exhaustion side of the problem
+ *
+ * Returns a plain result rather than a Response: `authorize()` is a NextAuth callback,
+ * not an HTTP handler, and must answer with null so the caller learns nothing about
+ * why the attempt failed.
+ *
+ * Call this BEFORE looking the user up, so a blocked attempt costs no database query
+ * and no password verification.
+ */
+export function consumeAuthAttempt(
+  request: Request | undefined,
+  email: string
+): { ok: boolean; retryAfterSeconds: number } {
+  const account = checkRateLimit("authAccount", `email:${email}`);
+  const source = checkRateLimit(
+    "authSource",
+    request ? identifyRequester(request, null) : "source:untrusted"
+  );
+
+  return {
+    ok: account.ok && source.ok,
+    retryAfterSeconds: Math.max(account.retryAfterSeconds, source.retryAfterSeconds),
   };
 }
 

@@ -1,7 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
+import {
+  getWorkspaceServerSnapshot,
+  getWorkspaceSnapshot,
+  refreshWorkspace,
+  subscribeToWorkspace,
+} from "@/lib/client/workspace-data";
 
 /**
  * Workspace indicator and switcher for the chat header.
@@ -14,11 +20,6 @@ import { useRouter } from "next/navigation";
  * Moving an existing conversation between workspaces lives in the project workspace,
  * where the consequence is visible.
  */
-
-interface ProjectOption {
-  id: string;
-  name: string;
-}
 
 interface ProjectSwitcherProps {
   /** Project the current conversation belongs to, or null for a personal chat. */
@@ -33,39 +34,24 @@ export function ProjectSwitcher({
   activeProjectId,
   onSwitch,
 }: ProjectSwitcherProps): React.ReactElement {
-  const [projects, setProjects] = useState<ProjectOption[]>([]);
+  // Read through the shared workspace store rather than issuing a second copy of the
+  // sidebar's request. The header and the rail now show the same list at the same
+  // moment, and creating or restoring a project updates both at once.
+  const { projects } = useSyncExternalStore(
+    subscribeToWorkspace,
+    getWorkspaceSnapshot,
+    getWorkspaceServerSnapshot
+  );
+
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
 
+  // Deduped by the store: when the sidebar is mounted this resolves against its
+  // in-flight request instead of starting another. On a page without the sidebar it is
+  // the fetch that populates the switcher.
   useEffect(() => {
-    let cancelled = false;
-
-    void (async () => {
-      try {
-        const res = await fetch("/api/projects");
-        if (!res.ok) return;
-        const body: unknown = await res.json();
-        const list = Array.isArray(body) ? body : (body as { projects?: unknown }).projects;
-        if (!Array.isArray(list) || cancelled) return;
-
-        setProjects(
-          list.flatMap((entry): ProjectOption[] => {
-            if (typeof entry !== "object" || entry === null) return [];
-            const row = entry as Record<string, unknown>;
-            return typeof row.id === "string" && typeof row.name === "string"
-              ? [{ id: row.id, name: row.name }]
-              : [];
-          })
-        );
-      } catch {
-        // Header degrades to the label alone; the chat itself is unaffected.
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
+    void refreshWorkspace();
   }, []);
 
   useEffect(() => {

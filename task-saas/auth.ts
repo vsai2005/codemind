@@ -4,7 +4,8 @@ import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@/lib/db";
 import { authConfig } from "./auth.config";
 import { logger } from "@/lib/logger";
-import { verifyPassword } from "@/lib/auth/password";
+import { burnPasswordVerification, verifyPassword } from "@/lib/auth/password";
+import { consumeAuthAttempt } from "@/lib/rate-limit";
 
 /**
  * Authentication.
@@ -51,7 +52,7 @@ const credentialsProvider = CredentialsProvider({
     password: { label: "Password", type: "password" },
     demo: { label: "Demo", type: "text" },
   },
-  async authorize(credentials) {
+  async authorize(credentials, request) {
     // --- Demo branch: explicit opt-in only ---------------------------------
     if (credentials?.demo === "true") {
       if (!isDemoAuthEnabled()) return null;
@@ -71,15 +72,32 @@ const credentialsProvider = CredentialsProvider({
     const password = typeof credentials?.password === "string" ? credentials.password : null;
     if (!email || !password) return null;
 
+    // Checked before the lookup, so a blocked attempt costs neither a query nor a
+    // password verification. A tripped limit answers null like any other failure —
+    // the caller is told the credentials did not work, not why.
+    const gate = consumeAuthAttempt(request, email);
+    if (!gate.ok) {
+      logger.warn("Sign-in attempt rate limited", {
+        retryAfterSeconds: gate.retryAfterSeconds,
+      });
+      return null;
+    }
+
     const user = await prisma.user.findUnique({
       where: { email },
       select: { id: true, name: true, email: true, image: true, passwordHash: true },
     });
 
     // Returning null for "no such user" and for "wrong password" alike keeps the two
-    // indistinguishable to the caller, so sign-in cannot be used to enumerate accounts.
+    // indistinguishable in the RESPONSE. `burnPasswordVerification` makes them
+    // indistinguishable in TIMING as well: without it this branch returns in under a
+    // millisecond while a real account spends ~100ms in scrypt, which answers "is this
+    // address registered?" just as clearly as a different error message would.
     // A user with no passwordHash (legacy or OAuth-only) has no password to verify.
-    if (!user?.passwordHash) return null;
+    if (!user?.passwordHash) {
+      await burnPasswordVerification(password);
+      return null;
+    }
 
     const valid = await verifyPassword(password, user.passwordHash);
     if (!valid) return null;

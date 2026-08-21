@@ -16,13 +16,27 @@ export const MAX_MESSAGES_PER_REQUEST = 200;
  * Hard cap on a single message, paired with AI_CONTEXT_MAX_TOKENS=512000.
  *
  * ContextManager estimates at 4 chars/token, so 2,000,000 chars ≈ 500,000 estimated
- * tokens — just inside the ~503,500 budget left after the 8,192 output reservation.
- * Raising the context limit without raising this would be inert: the cap rejects the
- * request before ContextManager ever runs.
+ * tokens — just inside the budget left after the output reservation. Raising the
+ * context limit without raising this would be inert: the cap rejects the request
+ * before ContextManager ever runs.
  *
  * Keep the two in step. See README "Context limits".
  */
 export const MAX_MESSAGE_CHARS = 2_000_000;
+
+/**
+ * Aggregate cap across every message in one request.
+ *
+ * The per-message cap does not bound the request: 200 messages at 2,000,000 characters
+ * each is 400MB, and `req.json()` allocates all of it before Zod sees the first field.
+ * This is what actually bounds the payload.
+ *
+ * Sized to hold a full 512K-token current message (~2M chars), a long conversation
+ * history, and one or two base64 image attachments (~14M chars per 10MB image) with
+ * room to spare. It sits below BODY_LIMITS.chat so the transport limit never rejects
+ * something this schema would have accepted — the two must move together.
+ */
+export const MAX_TOTAL_REQUEST_CHARS = 32_000_000;
 
 /** Base64 inflates by ~4/3; allow the data URL prefix on top. */
 const MAX_IMAGE_URL_CHARS = Math.ceil((MAX_IMAGE_BYTES * 4) / 3) + 128;
@@ -87,7 +101,16 @@ export const chatRequestSchema = z
   .refine((data) => data.messages[data.messages.length - 1]?.role === "user", {
     message: "the last message must be a user message",
     path: ["messages"],
-  });
+  })
+  .refine(
+    (data) =>
+      data.messages.reduce((total, message) => total + message.content.length, 0) <=
+      MAX_TOTAL_REQUEST_CHARS,
+    {
+      message: `the conversation exceeds the ${MAX_TOTAL_REQUEST_CHARS.toLocaleString()} character limit for a single request`,
+      path: ["messages"],
+    }
+  );
 
 export type ChatMessageInput = z.infer<typeof chatMessageSchema>;
 export type ChatRequest = z.infer<typeof chatRequestSchema>;

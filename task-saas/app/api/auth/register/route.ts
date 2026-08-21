@@ -5,6 +5,7 @@ import { prisma } from "@/lib/db";
 import { hashPassword, MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "@/lib/auth/password";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { logger } from "@/lib/logger";
+import { enforceBodyLimit } from "@/lib/http/body-limit";
 
 /**
  * Account creation.
@@ -28,13 +29,17 @@ const registerSchema = z.object({
 
 export async function POST(request: Request): Promise<Response> {
   try {
-    // Sign-up is unauthenticated, so it is rate limited by client IP. Without this,
-    // account creation is an open door for automated abuse.
-    const limited = enforceRateLimit("upload", request, null);
+    // Sign-up is unauthenticated, so there is no session to key on. It uses its own
+    // bucket rather than borrowing the upload one, keyed on the client IP where a
+    // trusted proxy makes one available and shared across all unauthenticated traffic
+    // otherwise — see CODEMIND_TRUSTED_PROXY_HOPS.
+    const limited = enforceRateLimit("register", request, null);
     if (limited) return limited;
 
     let body: unknown;
     try {
+      const oversized = enforceBodyLimit(request, "json");
+      if (oversized) return oversized;
       body = await request.json();
     } catch {
       return NextResponse.json({ error: "Invalid request body" }, { status: 400 });

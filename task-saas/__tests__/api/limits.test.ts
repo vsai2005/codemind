@@ -8,6 +8,7 @@ vi.mock("@/lib/db", () => ({
       create: vi.fn().mockResolvedValue({ id: "conv_1", userId: "user-1", summary: null }),
       findFirst: vi.fn().mockResolvedValue({ id: "conv_1", userId: "user-1", summary: null }),
       update: vi.fn().mockResolvedValue({}),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     message: {
       create: vi.fn().mockResolvedValue({ id: "msg_1" }),

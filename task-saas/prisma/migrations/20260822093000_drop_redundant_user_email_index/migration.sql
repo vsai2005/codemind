@@ -1,0 +1,12 @@
+-- Drop the redundant non-unique index on User.email.
+--
+-- `User_email_key` (created by @unique in the init migration) already indexes this
+-- column and is what every sign-in lookup uses. `User_email_idx` covers exactly the
+-- same column with no added selectivity, so it only costs write time on a table that
+-- is written on every sign-up and updated on every profile change.
+--
+-- Forward-only and non-destructive: dropping a redundant index removes no row and no
+-- constraint. Uniqueness of email continues to be enforced by User_email_key.
+--
+-- IF EXISTS so the migration is safe to apply to a database that never had it.
+DROP INDEX IF EXISTS "User_email_idx";

@@ -31,6 +31,7 @@ import { logger } from "@/lib/logger";
 // Prisma is used as a value here (Prisma.DbNull), not only as a type.
 import { Prisma } from "@prisma/client";
 import type { ArtifactMetadata, NormalizedArtifact } from "@/lib/artifacts/types";
+import { enforceBodyLimit } from "@/lib/http/body-limit";
 
 /**
  * How far back historical retrieval scans. Older turns than this are represented by
@@ -171,6 +172,7 @@ function deriveTitle(rawContent: string): string {
  */
 async function summarizeDropped(
   conversationId: string,
+  userId: string,
   existingSummary: string | null,
   droppedMessagesContent: string
 ): Promise<void> {
@@ -196,8 +198,11 @@ ${droppedMessagesContent}
       maxTokens: 1024,
     });
 
-    await prisma.conversation.update({
-      where: { id: conversationId },
+    // updateMany so ownership is part of the filter the database enforces, matching
+    // every other write in the app. The id is server-derived and already checked, so
+    // this is defence in depth rather than a fix for a reachable hole.
+    await prisma.conversation.updateMany({
+      where: { id: conversationId, userId },
       data: { summary: summaryResult.text.trim() },
     });
   } catch (error) {
@@ -244,6 +249,8 @@ export async function POST(req: Request): Promise<Response> {
 
     let body: unknown;
     try {
+      const oversized = enforceBodyLimit(req, "chat");
+      if (oversized) return oversized;
       body = await req.json();
     } catch {
       return NextResponse.json({ error: "Invalid JSON in request body" }, { status: 400 });
@@ -493,13 +500,14 @@ export async function POST(req: Request): Promise<Response> {
               plan: plan ? (plan as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
             },
           });
-          // Keep the sidebar's "most recent" ordering honest.
-          await prisma.conversation.update({
-            where: { id: activeConversationId },
+          // Keep the sidebar's "most recent" ordering honest. updateMany so the
+          // owner is part of the filter the database enforces.
+          await prisma.conversation.updateMany({
+            where: { id: activeConversationId, userId },
             data: { updatedAt: new Date() },
           });
 
-          await summarizeDropped(activeConversationId, existingSummary, ctx.droppedMessagesContent);
+          await summarizeDropped(activeConversationId, userId, existingSummary, ctx.droppedMessagesContent);
         },
       });
 
@@ -690,13 +698,13 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
           "Narrowing the request (fewer files, or one part at a time) usually succeeds.",
         ].join("\n");
 
-        await persistTurn(conversationId, originalRawContent, visible, null, {
+        await persistTurn(conversationId, userId, originalRawContent, visible, null, {
           provider,
           model: providerModelId,
           plan,
         });
         writer.text(visible);
-        await summarizeDropped(conversationId, existingSummary, droppedMessagesContent);
+        await summarizeDropped(conversationId, userId, existingSummary, droppedMessagesContent);
         return;
       }
 
@@ -723,18 +731,19 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
 
         const visible = `Your ${intent.toUpperCase()} could not be packaged, so there is nothing to download. The content was generated correctly — this was a failure while building the file. Please try again.`;
 
-        await persistTurn(conversationId, originalRawContent, visible, null, {
+        await persistTurn(conversationId, userId, originalRawContent, visible, null, {
           provider,
           model: providerModelId,
           plan,
         });
         writer.text(visible);
-        await summarizeDropped(conversationId, existingSummary, droppedMessagesContent);
+        await summarizeDropped(conversationId, userId, existingSummary, droppedMessagesContent);
         return;
       }
 
       const record = await persistTurn(
         conversationId,
+        userId,
         originalRawContent,
         generation.summary,
         { artifact: generation.artifact, byteSize: body.byteLength, userId },
@@ -755,7 +764,7 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
         writer.annotate({ codemindArtifacts: [metadata] } as never);
       }
 
-      await summarizeDropped(conversationId, existingSummary, droppedMessagesContent);
+      await summarizeDropped(conversationId, userId, existingSummary, droppedMessagesContent);
     },
     { headers: { "x-conversation-id": conversationId } }
   );
@@ -767,6 +776,7 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
  */
 async function persistTurn(
   conversationId: string,
+  userId: string,
   userContent: string,
   visibleText: string,
   artifactData: { artifact: NormalizedArtifact; byteSize: number; userId: string } | null,
@@ -787,14 +797,14 @@ async function persistTurn(
     },
   });
 
-  await prisma.conversation.update({
-    where: { id: conversationId },
+  await prisma.conversation.updateMany({
+    where: { id: conversationId, userId },
     data: { updatedAt: new Date() },
   });
 
   if (!artifactData) return null;
 
-  const { artifact, byteSize, userId } = artifactData;
+  const { artifact, byteSize } = artifactData;
   const created = await prisma.artifact.create({
     data: {
       messageId: assistantMessage.id,

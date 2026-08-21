@@ -5,6 +5,7 @@ import {
   errorResponse,
   getAuthenticatedUserId,
 } from "@/lib/api-utils";
+import { enforceBodyLimit } from "@/lib/http/body-limit";
 
 interface RouteContext {
   params: { id: string };
@@ -49,6 +50,8 @@ export async function PUT(
 
   let body: unknown;
   try {
+    const oversized = enforceBodyLimit(request, "json");
+    if (oversized) return oversized;
     body = await request.json();
   } catch {
     return errorResponse("INVALID_JSON", "Invalid JSON in request body", 400);

@@ -4,6 +4,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/db";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { logger } from "@/lib/logger";
+import { enforceBodyLimit } from "@/lib/http/body-limit";
 
 /**
  * Project collection.
@@ -105,6 +106,8 @@ export async function POST(request: Request): Promise<Response> {
 
     let raw: unknown;
     try {
+      const oversized = enforceBodyLimit(request, "json");
+      if (oversized) return oversized;
       raw = await request.json();
     } catch {
       return NextResponse.json({ error: "Invalid JSON in request body" }, { status: 400 });

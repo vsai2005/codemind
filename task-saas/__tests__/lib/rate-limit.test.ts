@@ -81,14 +81,59 @@ describe("rate limiter", () => {
     expect(enforceRateLimit("chat", request, "u1")).toBeNull();
   });
 
-  it("prefers the user id over the client IP", () => {
+  it("prefers the user id over any client-supplied address", () => {
     const request = new Request("http://localhost/api/chat", {
       headers: { "x-forwarded-for": "203.0.113.9, 10.0.0.1" },
     });
 
     expect(identifyRequester(request, "user-123")).toBe("user:user-123");
+  });
+
+  it("ignores x-forwarded-for when no trusted proxy is configured", () => {
+    delete process.env.CODEMIND_TRUSTED_PROXY_HOPS;
+
+    const request = new Request("http://localhost/api/chat", {
+      headers: { "x-forwarded-for": "203.0.113.9, 10.0.0.1" },
+    });
+
+    // The header is written by the client. Trusting its leftmost entry let a requester
+    // mint a fresh bucket per request simply by varying it, so with no declared proxy
+    // every unauthenticated caller shares one bucket instead.
+    expect(identifyRequester(request, null)).toBe("source:untrusted");
+    expect(identifyRequester(new Request("http://localhost/"), null)).toBe("source:untrusted");
+  });
+
+  it("reads the hop the trusted proxy appended, not the one the client wrote", () => {
+    process.env.CODEMIND_TRUSTED_PROXY_HOPS = "1";
+
+    // A client forging "1.2.3.4" is prepended; our own proxy appends the real peer.
+    const forged = new Request("http://localhost/api/chat", {
+      headers: { "x-forwarded-for": "1.2.3.4, 203.0.113.9" },
+    });
+    expect(identifyRequester(forged, null)).toBe("ip:203.0.113.9");
+
+    // x-real-ip is meaningful only for a single directly-attached proxy.
+    const realIp = new Request("http://localhost/api/chat", {
+      headers: { "x-real-ip": "198.51.100.7" },
+    });
+    expect(identifyRequester(realIp, null)).toBe("ip:198.51.100.7");
+
+    // Fewer entries than declared hops means the chain is not what we were told.
+    const short = new Request("http://localhost/api/chat");
+    expect(identifyRequester(short, null)).toBe("source:untrusted");
+
+    delete process.env.CODEMIND_TRUSTED_PROXY_HOPS;
+  });
+
+  it("counts hops from the right when two proxies are declared", () => {
+    process.env.CODEMIND_TRUSTED_PROXY_HOPS = "2";
+
+    const request = new Request("http://localhost/api/chat", {
+      headers: { "x-forwarded-for": "1.2.3.4, 203.0.113.9, 10.0.0.1" },
+    });
     expect(identifyRequester(request, null)).toBe("ip:203.0.113.9");
-    expect(identifyRequester(new Request("http://localhost/"), null)).toBe("ip:unknown");
+
+    delete process.env.CODEMIND_TRUSTED_PROXY_HOPS;
   });
 
   it("exposes a 429 response shape independent of enforcement", async () => {

@@ -37,11 +37,18 @@ export async function GET(
     const limited = enforceRateLimit("download", request, userId);
     if (limited) return limited;
 
-    // Ownership is proven by the join, not by anything the client sent.
+    // Ownership comes from the query, never from anything the client sent.
+    //
+    // Two predicates rather than one, deliberately. `userId` is the denormalised owner
+    // column that Artifact_userId_createdAt_idx exists to serve — this is the query it
+    // was added for. The join through message → conversation is kept alongside it
+    // because Artifact.userId is nullable: any row written before the denormalisation
+    // migration, or by a future path that forgets to stamp it, still authorises
+    // correctly instead of silently 404ing for its real owner.
     const artifact = await prisma.artifact.findFirst({
       where: {
         id: params.id,
-        message: { conversation: { userId } },
+        OR: [{ userId }, { userId: null, message: { conversation: { userId } } }],
       },
       select: { id: true, filename: true, payload: true },
     });

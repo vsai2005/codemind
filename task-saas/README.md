@@ -10,6 +10,42 @@ CodeMind is an intelligent, AI-first engineering workspace. It provides a profes
 - **Persistent Context:** History, summaries and artifacts stored in PostgreSQL via Prisma.
 - **Downloadable Artifacts:** Project ZIPs, PDFs and single files delivered as download cards, not as walls of source in the chat.
 - **Key Failover:** Multiple NVIDIA API keys with automatic cooldown and rotation.
+- **Projects:** Persistent workspaces with their own instructions, memory, conversations and artifacts.
+
+---
+
+## Projects
+
+A project is a workspace with standing instructions and durable memory that are
+injected into every conversation filed under it, through the same `ContextManager`
+budget as everything else — not a parallel context system. Conversations that are not
+filed into a project live in **Personal**, which is a first-class home rather than a
+leftover bucket.
+
+**Archiving hides, it never deletes.** An archived project keeps every conversation,
+artifact, instruction and memory entry exactly as it was. It disappears from the
+sidebar's active list and reappears under the **Archived** disclosure below it, where
+*Restore* puts it back. (Before this existed, the only route back to an archived
+project was a URL you had to have kept — the workspace page held the only Unarchive
+control, and nothing linked to it.)
+
+**Deleting a project does not delete its work either.** `Conversation.projectId` is
+`onDelete: SetNull`, so deleting a project unfiles its conversations and they reappear
+under Personal.
+
+---
+
+## Legacy: Tasks
+
+`/tasks/*`, `/api/tasks/*` and the `Task` model predate CodeMind and are **not** part
+of the AI workspace. They are left intact and fully functional rather than removed: the
+routes are authenticated and user-scoped like everything else, the `Task` table may
+hold real rows, and dropping it would require a destructive migration for no benefit.
+
+Nothing in the CodeMind UI links to them — the sidebar, workspace and chat surfaces do
+not reference Tasks at all, and the shared `Navbar` they use is rendered only by the
+Tasks pages themselves. Treat this as isolated legacy surface area: safe to leave, and
+safe to remove later in a deliberate change that also handles the data.
 
 ---
 
@@ -68,7 +104,18 @@ used for automatic failover when a key is rate limited.
 
 Optional tuning: `NEMOTRON_MODEL`, `NEMOTRON_BASE_URL`, `NVIDIA_VISION_MODEL`,
 `AI_MAX_OUTPUT_TOKENS`, `AI_CONTEXT_MAX_TOKENS`, `AI_ARTIFACT_MAX_OUTPUT_TOKENS`,
-`CODEMIND_DISABLE_RATE_LIMIT`.
+`CODEMIND_TRUSTED_PROXY_HOPS`, `CODEMIND_DISABLE_RATE_LIMIT`.
+
+Running `docker compose` additionally requires `POSTGRES_PASSWORD` — the compose file
+has no default for it and refuses to start without one, so the bundled database is
+never brought up with a guessable password.
+
+**Validation runs at startup.** `instrumentation.ts` calls `validateEnv()` before the
+server accepts a request: a missing `DATABASE_URL` or an `AUTH_SECRET` shorter than 32
+characters aborts the boot with a message naming the variable, instead of surfacing as
+a failure at the first sign-in. Optional problems — no provider key, an out-of-range
+token limit, demo auth enabled in production, no trusted proxy configured — are logged
+as warnings and the app continues. Only variable *names* are ever printed.
 
 > Google OAuth is **not** used. Earlier versions listed `AUTH_GOOGLE_ID` /
 > `AUTH_GOOGLE_SECRET` as required; no Google provider is registered anywhere in the
@@ -118,23 +165,72 @@ legacy `/api/export/*` routes keep serving them, using the same validation rules
 
 ## Rate limits
 
-Expensive endpoints are rate limited per authenticated user (falling back to client IP),
-using an in-memory fixed-window counter. Exceeding a limit returns **429** with a
-`Retry-After` header.
+Expensive endpoints are rate limited per authenticated user, using an in-memory
+fixed-window counter. Exceeding a limit returns **429** with a `Retry-After` header.
 
-| Endpoint | Limit |
-| --- | --- |
-| `POST /api/chat` | 20 requests / minute |
-| `POST /api/upload` | 30 requests / minute |
-| `POST /api/export/*` | 30 requests / minute |
-| `GET /api/artifacts/:id/download` | 60 requests / minute |
+| Endpoint | Limit | Keyed on |
+| --- | --- | --- |
+| `POST /api/chat` | 20 / minute | user |
+| `POST /api/upload` | 30 / minute | user |
+| `POST /api/export/*` | 30 / minute | user |
+| `GET /api/artifacts/:id/download` | 60 / minute | user |
+| Project create / update / delete | 60 / minute | user |
+| Sign-in | 10 / 5 minutes | **submitted email** |
+| Sign-in | 60 / minute | source |
+| `POST /api/auth/register` | 20 / hour | source |
 
 Limits are sized so ordinary interactive use never trips them. Set
 `CODEMIND_DISABLE_RATE_LIMIT=true` to disable entirely (local development only).
 
+**Sign-in** is limited on two axes. The per-email bucket is what stops password
+guessing — an attacker targeting one account cannot escape it by rotating address or
+clearing cookies. The per-source bucket bounds total scrypt work, since each password
+verification costs roughly 16MB and 100ms and would otherwise be a cheap way to exhaust
+the process. Neither is a lockout: the windows roll, so a legitimate user who mistypes
+repeatedly is delayed at worst.
+
+### Trusted proxies
+
+`x-forwarded-for` is written by the client and appended to by each proxy, so only the
+entries added by proxies **you** operate mean anything. Set
+`CODEMIND_TRUSTED_PROXY_HOPS` to how many of those sit in front of the app:
+
+| Value | Meaning |
+| --- | --- |
+| `0` (default) | No trusted proxy. The header is ignored entirely. |
+| `1` | One reverse proxy — nginx, Caddy, a single load balancer. |
+| `2` | A CDN in front of a load balancer. |
+
+With `0`, unauthenticated requests share a single bucket rather than each getting their
+own. That is deliberate: a shared limit is a denial-of-service risk, but a limit keyed
+on a header the client can vary at will is not a limit at all. **Set this whenever the
+app is reachable through a proxy**, or per-IP limiting cannot work.
+
 **Limitation:** counters live in process memory. With the current single-container
 deployment that is one shared counter set. Across multiple replicas each instance would
 enforce its own share — an accepted trade-off to avoid a Redis dependency.
+
+---
+
+## Request size limits
+
+Separate from the context limits below, and for a different reason: `request.json()`
+and `request.formData()` fully materialise a body in memory before any schema sees it,
+so the size check has to happen before parsing. `lib/http/body-limit.ts` reads
+`Content-Length` and returns **413** before the body is read.
+
+| Endpoint | Limit |
+| --- | --- |
+| `POST /api/chat` | 48 MB |
+| `POST /api/upload` | 12 MB |
+| `PATCH /api/projects/:id` | 2 MB |
+| Everything else | 256 KB |
+
+The chat limit is generous on purpose — a full 512K-token turn is roughly 2MB of text,
+and image attachments travel inside the message as base64 data URLs. It is paired with
+`MAX_TOTAL_REQUEST_CHARS` (32,000,000) in `types/chat.ts`, which bounds the aggregate
+across all messages; the per-message cap alone never bounded the request. **Keep the
+two in step**, with the transport limit above the character limit.
 
 ---
 
@@ -147,6 +243,25 @@ Three limits stack, and the smallest one wins:
 | NVIDIA NIM hard ceiling | **1,048,576 tokens** | provider-enforced |
 | CodeMind context window | **512,000 tokens** | `AI_CONTEXT_MAX_TOKENS` |
 | Single message | **2,000,000 chars** (≈500K est. tokens) | `MAX_MESSAGE_CHARS`, `types/chat.ts` |
+
+### Where the numbers come from
+
+There is exactly one definition of each limit, in `lib/env.ts`, and one path to it:
+
+```
+environment variable  →  validated runtime configuration (lib/env.ts)  →  ContextManager
+```
+
+`AI_LIMIT_DEFAULTS` holds the shipped values — **512,000** context and **16,384**
+output — which apply whenever the variable is unset or empty. `ContextManager` and the
+artifact pipeline re-export the accessors rather than reading `process.env`, so no
+module can introduce a competing default. `AI_LIMIT_BOUNDS` clamps anything outside the
+supported range and `validateEnv()` reports the adjustment at startup.
+
+This matters because the two used to disagree: the README documented 512,000 while the
+code default was 128,000, and the gap was papered over by a value in a gitignored
+`.env`. Every deployment other than that one machine silently ran at a quarter of the
+documented window.
 
 The provider ceiling was measured directly against
 `nvidia/nemotron-3-ultra-550b-a55b` on `integrate.api.nvidia.com`, not taken from
@@ -212,7 +327,7 @@ clears it, but the durable fix is keeping the project outside any synced directo
 
 ## Docker Development/Deployment
 
-1. Create your `.env` with the required secrets.
+1. Create your `.env` with the required secrets, including `POSTGRES_PASSWORD`.
 2. Build and start:
    ```bash
    docker compose up -d --build
@@ -222,6 +337,19 @@ clears it, but the durable fix is keeping the project outside any synced directo
    docker compose ps
    docker compose logs --tail=100
    ```
+
+### Database exposure
+
+The `db` service publishes **`127.0.0.1:5432:5432`**, not `5432:5432`. The app
+container reaches PostgreSQL over the compose network and never uses the published
+port; it exists only so `psql` and Prisma Studio can connect from the host.
+
+Published as `5432:5432` it bound to every interface, which on a machine you also
+browse to from a phone means every device on the LAN could open the database. If you do
+not need host access, delete the `ports:` block from the `db` service entirely.
+
+Credentials come from `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` in your
+environment. There is no default password — compose fails to start without one.
 
 ## Running Tests
 ```bash

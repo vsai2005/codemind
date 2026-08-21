@@ -3,6 +3,7 @@ import { getModel } from "@/lib/ai/gateway";
 import { parseArtifactOutput } from "./parse";
 import { validateArtifact } from "./validate";
 import { scrubForLog } from "@/lib/ai/failure-classification";
+import { getArtifactOutputTokenLimit } from "@/lib/env";
 import { ARTIFACT_LIMITS, type ArtifactType, type NormalizedArtifact } from "./types";
 
 /**
@@ -13,24 +14,15 @@ import { ARTIFACT_LIMITS, type ArtifactType, type NormalizedArtifact } from "./t
  * validated result leaves this module.
  */
 
-const DEFAULT_ARTIFACT_OUTPUT_TOKENS = 16_000;
-const MAX_ARTIFACT_OUTPUT_TOKENS = 32_000;
-
 /**
  * Output budget for artifact generation. Kept separate from the chat limit so normal
- * replies stay short, and hard-capped: raising this indefinitely is not how large
- * projects are handled — an over-large project fails honestly instead.
+ * replies stay short, and hard-capped by AI_LIMIT_BOUNDS: raising this indefinitely is
+ * not how large projects are handled — an over-large project fails honestly instead.
+ *
+ * Defined in lib/env.ts with every other limit; re-exported here so existing importers
+ * keep their import path.
  */
-export function getArtifactOutputTokenLimit(): number {
-  const raw = process.env.AI_ARTIFACT_MAX_OUTPUT_TOKENS;
-  if (raw) {
-    const parsed = Number.parseInt(raw, 10);
-    if (!Number.isNaN(parsed) && parsed > 0) {
-      return Math.min(parsed, MAX_ARTIFACT_OUTPUT_TOKENS);
-    }
-  }
-  return DEFAULT_ARTIFACT_OUTPUT_TOKENS;
-}
+export { getArtifactOutputTokenLimit };
 
 const COMMON_RULES = `Hard rules:
 - Every file must be COMPLETE and runnable. Never write "...", "continue", "rest of the code", "omitted for brevity", or leave a statement, function or bracket unfinished.

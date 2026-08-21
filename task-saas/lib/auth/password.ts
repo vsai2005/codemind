@@ -139,6 +139,34 @@ export async function verifyPassword(password: string, stored: string): Promise<
   }
 }
 
+/**
+ * A genuine hash of a random throwaway password, built once per process.
+ *
+ * Its only purpose is to give the "no such account" path something real to verify
+ * against, so that branch costs the same scrypt work as a wrong password for an
+ * account that does exist. Nothing ever verifies successfully against it.
+ */
+let decoyHash: Promise<string> | null = null;
+
+/**
+ * Spend one password verification and discard the result.
+ *
+ * Called when there is no user to check, or the user has no password set. Without it,
+ * sign-in returns in under a millisecond for an unknown address and in ~100ms for a
+ * known one — a timing oracle that answers "is this person registered?" regardless of
+ * the response body being identical.
+ */
+export async function burnPasswordVerification(password: string): Promise<void> {
+  if (!decoyHash) {
+    decoyHash = hashPassword(randomBytes(32).toString("hex"));
+  }
+  try {
+    await verifyPassword(password, await decoyHash);
+  } catch {
+    // The outcome is deliberately unused; only the elapsed work matters.
+  }
+}
+
 /** True when a stored hash was made with weaker parameters than the current policy. */
 export function needsRehash(stored: string): boolean {
   const parts = stored.split("$");

@@ -7,6 +7,7 @@ import { contentDisposition, validateArtifactFilename } from "@/lib/artifacts/pa
 import { stripAttachmentTag } from "@/lib/attachments";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { logger } from "@/lib/logger";
+import { enforceBodyLimit } from "@/lib/http/body-limit";
 
 /**
  * Export any assistant message as a PDF.
@@ -37,6 +38,8 @@ export async function POST(req: Request): Promise<Response> {
 
     let raw: unknown;
     try {
+      const oversized = enforceBodyLimit(req, "json");
+      if (oversized) return oversized;
       raw = await req.json();
     } catch {
       return NextResponse.json({ error: "Invalid JSON in request body" }, { status: 400 });

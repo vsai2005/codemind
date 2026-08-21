@@ -7,6 +7,7 @@ import {
 } from "@/lib/attachments";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { logger } from "@/lib/logger";
+import { enforceBodyLimit } from "@/lib/http/body-limit";
 
 // pdf-parse is CommonJS with no usable ESM default export in this setup.
 const pdfParse = require("pdf-parse");
@@ -16,6 +17,47 @@ const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
 const TEXT_FILE_EXTENSIONS =
   /\.(md|json|ts|tsx|js|jsx|py|java|c|cpp|h|css|html|yml|yaml|sh)$/i;
+
+/**
+ * How long a single PDF may take to parse, and how many pages are read.
+ *
+ * pdf-parse runs synchronously inside the request. A deliberately pathological file —
+ * deeply nested objects, a decompression bomb, tens of thousands of pages — can hold a
+ * worker indefinitely, and the upload bucket allows 30 of those a minute.
+ */
+const PDF_PARSE_TIMEOUT_MS = 15_000;
+const PDF_MAX_PAGES = 500;
+
+interface PdfParseResult {
+  text: unknown;
+}
+
+/**
+ * Parse a PDF, giving up after PDF_PARSE_TIMEOUT_MS.
+ *
+ * The timeout bounds how long the REQUEST waits, not the parser itself: pdf-parse
+ * offers no cancellation, so a runaway parse continues in the background until it
+ * finishes. That is still the difference between one slow request and a worker pinned
+ * forever, and the page cap keeps the common pathological cases from starting at all.
+ */
+async function parsePdfWithTimeout(buffer: Buffer): Promise<string | null> {
+  let timer: NodeJS.Timeout | undefined;
+
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), PDF_PARSE_TIMEOUT_MS);
+  });
+
+  try {
+    const parsed = await Promise.race([
+      pdfParse(buffer, { max: PDF_MAX_PAGES }) as Promise<PdfParseResult>,
+      timeout,
+    ]);
+    if (parsed === null) return null;
+    return typeof parsed.text === "string" ? parsed.text : "";
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 export async function POST(req: Request): Promise<Response> {
   try {
@@ -27,6 +69,8 @@ export async function POST(req: Request): Promise<Response> {
     const limited = enforceRateLimit("upload", req, session.user.id);
     if (limited) return limited;
 
+    const oversized = enforceBodyLimit(req, "upload");
+    if (oversized) return oversized;
     const formData = await req.formData();
     const file = formData.get("file");
 
@@ -43,11 +87,21 @@ export async function POST(req: Request): Promise<Response> {
     const buffer = Buffer.from(await file.arrayBuffer());
 
     if (type === "application/pdf") {
-      const data = await pdfParse(buffer);
+      const text = await parsePdfWithTimeout(buffer);
+      if (text === null) {
+        logger.warn("PDF parsing timed out", { byteSize: buffer.length });
+        return NextResponse.json(
+          {
+            error:
+              "This PDF took too long to read. Try a smaller file, or paste the text you need directly.",
+          },
+          { status: 422 }
+        );
+      }
       return NextResponse.json({
         type: "document",
         name,
-        extractedText: String(data.text).substring(0, MAX_DOCUMENT_CHARS),
+        extractedText: text.substring(0, MAX_DOCUMENT_CHARS),
       });
     }
 

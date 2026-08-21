@@ -285,4 +285,62 @@ describe("ContextManager.buildContext", () => {
       expect(result.pressure.used).toBeLessThanOrEqual(result.pressure.total);
     });
   });
+
+  describe("project workspace context", () => {
+    /**
+     * The defect: project instructions and memory were capped at a share of the TOTAL
+     * budget but never against what actually remained. When the current message had
+     * already consumed most of the window both blocks were still added at full size,
+     * driving the running budget negative and pushing the assembled prompt past the
+     * configured context limit.
+     */
+    it("does not exceed the budget when the current message has consumed it", () => {
+      process.env.AI_CONTEXT_MAX_TOKENS = "4000";
+      process.env.AI_MAX_OUTPUT_TOKENS = "200";
+
+      // Sized so the message fits (≈3,367 of a ≈3,420-token budget) but leaves LESS
+      // than the 5% ratio cap. That is the shape that broke: a remainder smaller than
+      // the share each block was allowed to claim. A message that merely fits with room
+      // to spare would pass under the old logic too and prove nothing.
+      const nearlyFull = "Q".repeat(10_100);
+
+      const result = ContextManager.buildContext(
+        [],
+        { id: "n", role: "user", content: nearlyFull } as any,
+        null,
+        {
+          projectInstructions: "I".repeat(20_000),
+          projectMemory: [
+            { title: "Stack", items: Array.from({ length: 40 }, () => "M".repeat(400)) },
+          ],
+        }
+      );
+
+      expect(result.pressure.used).toBeLessThanOrEqual(result.pressure.total);
+      expect(
+        estimateTokens(result.contextBlocks) + estimateTokens(nearlyFull)
+      ).toBeLessThanOrEqual(result.pressure.total);
+    });
+
+    it("still injects project context when there is room for it", () => {
+      process.env.AI_CONTEXT_MAX_TOKENS = "50000";
+      process.env.AI_MAX_OUTPUT_TOKENS = "1000";
+
+      const result = ContextManager.buildContext(
+        [],
+        { id: "n", role: "user", content: "how do we handle migrations here?" } as any,
+        null,
+        {
+          projectInstructions: "Always use forward-only migrations.",
+          projectMemory: [{ title: "Stack", items: ["PostgreSQL", "Prisma"] }],
+        }
+      );
+
+      expect(result.contextBlocks).toContain("PROJECT INSTRUCTIONS");
+      expect(result.contextBlocks).toContain("forward-only migrations");
+      expect(result.contextBlocks).toContain("PROJECT MEMORY");
+      expect(result.contextBlocks).toContain("PostgreSQL");
+      expect(result.pressure.used).toBeLessThanOrEqual(result.pressure.total);
+    });
+  });
 });

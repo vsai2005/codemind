@@ -44,7 +44,9 @@ model User {
   conversations Conversation[]
   artifacts     Artifact[]
 
-  @@index([email])
+  /// No @@index([email]): `@unique` above already creates one. A second, non-unique
+  /// index over the same column only adds write cost on a table that is written on
+  /// every sign-up and read on every sign-in.
 }
 
 model Task {
