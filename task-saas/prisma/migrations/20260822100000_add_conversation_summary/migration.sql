@@ -1,0 +1,20 @@
+-- Add Conversation.summary, which schema.prisma has always declared but no migration
+-- ever created.
+--
+-- The column reached the local development database outside the migration history, so
+-- every local run worked while the migration files alone could not reproduce the
+-- schema. The first deployment to a fresh database (Aiven) failed at runtime with:
+--   The column `Conversation.summary` does not exist in the current database
+--
+-- `prisma migrate deploy` and `migrate status` both reported success because they
+-- compare the _prisma_migrations ledger, not the actual columns. `prisma migrate diff`
+-- is the check that catches this, and it reports this column as the only drift.
+--
+-- Forward-only and non-destructive: a nullable TEXT column with no default and no
+-- backfill. Existing rows get NULL, which is exactly what an unsummarised conversation
+-- means to lib/ai/context-manager.ts.
+--
+-- IF NOT EXISTS because the column already exists in databases that were created
+-- before this migration (the local dev database). This makes the migration safe to
+-- apply everywhere rather than requiring `migrate resolve --applied` per environment.
+ALTER TABLE "Conversation" ADD COLUMN IF NOT EXISTS "summary" TEXT;
