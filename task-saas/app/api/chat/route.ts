@@ -27,6 +27,7 @@ import { scrubForLog } from "@/lib/ai/failure-classification";
 import { releaseOnStreamEnd } from "@/lib/ai/stream-lifecycle";
 import { buildPlan, planToPromptBlock, type ChatPlan } from "@/lib/ai/planning";
 import { createDataStreamPrefix } from "@/lib/ai/plan-stream";
+import { guardChatStream } from "@/lib/ai/chat-output-guard";
 import { logger } from "@/lib/logger";
 // Prisma is used as a value here (Prisma.DbNull), not only as a type.
 import { Prisma } from "@prisma/client";
@@ -559,9 +560,16 @@ export async function POST(req: Request): Promise<Response> {
       }
     }
 
-    const streamed = result.toDataStreamResponse({
-      headers: { "x-conversation-id": activeConversationId },
-    });
+    // Deterministic output guard. The system prompt forbids tool-call syntax, but a
+    // prompt cannot guarantee it — three revisions of that prompt did not stop the
+    // model inventing one. This drops it before it reaches the browser.
+    // See lib/ai/chat-output-guard.ts.
+    const streamed = guardChatStream(
+      result.toDataStreamResponse({
+        headers: { "x-conversation-id": activeConversationId },
+      }),
+      { conversationId: activeConversationId }
+    );
 
     // The plan is written ahead of the model's own stream so the UI can render it
     // while generation is still running.
