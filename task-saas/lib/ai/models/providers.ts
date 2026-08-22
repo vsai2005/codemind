@@ -134,6 +134,35 @@ const deepseekAdapter: ProviderAdapter = {
       deepseekClient = createOpenAI({
         baseURL: readEnv("DEEPSEEK_BASE_URL") ?? DEFAULT_DEEPSEEK_BASE_URL,
         apiKey,
+        /**
+         * Stays "compatible", so this model reports NO token usage while streaming:
+         * @ai-sdk/openai sends `stream_options: { include_usage: true }` only under
+         * "strict", and without it the SDK leaves usage at its NaN seed and
+         * Message.promptTokens / completionTokens are written null.
+         *
+         * "strict" WAS TESTED HERE (2026-08-22) AND THE RESULT WAS INCONCLUSIVE —
+         * not negative. The model was too congested to measure:
+         *
+         *   stream, no stream_options    200 OK, first header after  51.9s
+         *   stream, no stream_options    200 OK, first header after 102.2s
+         *   stream, no stream_options    aborted at 240s
+         *   non-stream, no stream_options aborted at  90s
+         *   stream, WITH stream_options  aborted at 240s (x2)
+         *
+         * Probes carrying NONE of the change failed the same way, so the timeouts
+         * cannot be attributed to stream_options. Two further points argue the field
+         * itself is fine: a malformed request to this same endpoint returns 400 in
+         * ~95ms, which is what parameter rejection looks like rather than a 240s
+         * hang; and the NVIDIA adapter sends stream_options to this very host
+         * (integrate.api.nvidia.com) and gets usage back promptly.
+         *
+         * RE-TEST when the model is not saturated — baseline first-header latency
+         * under ~5s — and flip to "strict" only if a with-field probe returns finite
+         * usage. Do not flip it on the reasoning above alone.
+         *
+         * Google/Gemini deliberately stays "compatible" too: its compatibility layer
+         * is known to reject some OpenAI-shaped fields and has not been tested.
+         */
         compatibility: "compatible",
         // Fail fast if the endpoint accepts the connection but never answers.
         fetch: (input, init) => fetchWithHeaderTimeout(input, init),

@@ -42,6 +42,13 @@ const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
  * DeepSeek V4 Flash emits a reasoning pass before its answer, and both are billed
  * against the same output budget. 16k leaves room for the thinking tokens without the
  * visible reply being cut off mid-sentence.
+ *
+ * Separate question, still UNANSWERED: whether the usage this provider REPORTS counts
+ * the reasoning pass in completionTokens or only the visible reply. That is not the
+ * same as the ceiling above, and it remains unmeasured because this model reports no
+ * usage at all while streaming — see the compatibility note in
+ * lib/ai/models/providers.ts. Until it is measured, do not treat DeepSeek
+ * completionTokens as "length of the visible reply".
  */
 const DEEPSEEK_MAX_OUTPUT_TOKENS = 16_384;
 

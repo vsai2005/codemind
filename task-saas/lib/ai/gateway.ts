@@ -243,6 +243,23 @@ export const nvidia = createOpenAI({
   // written into the Authorization header inside fetchWithScheduler.
   apiKey: "managed-by-key-scheduler",
   fetch: fetchWithScheduler,
+  /**
+   * Makes the provider report token usage on the streaming path.
+   *
+   * @ai-sdk/openai adds `stream_options: { include_usage: true }` to the streaming
+   * request body only under "strict"; the default "compatible" omits it, the endpoint
+   * then sends no usage chunk, and the SDK leaves usage at its NaN seed. That is why
+   * Message.promptTokens / completionTokens were always null.
+   *
+   * Verified against the SDK: "strict" changes NOTHING else — not headers, not
+   * getArgs, not the failed-response handler. The only difference on the wire is that
+   * one extra body field (dist/index.js:494-495).
+   *
+   * Set on NVIDIA ONLY, and verified against the live integrate API. Google and
+   * DeepSeek stay "compatible" until each is tested the same way; Gemini's
+   * compatibility layer is already known to reject some OpenAI-shaped fields.
+   */
+  compatibility: "strict",
 });
 
 export const getVisionModel = () =>
