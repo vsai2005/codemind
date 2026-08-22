@@ -52,6 +52,22 @@ function ChatWorkspace(): React.ReactElement {
 
   const [stopped, setStopped] = useState(false);
 
+  /**
+   * The conversation the server filed this chat under, learned from the
+   * x-conversation-id response header.
+   *
+   * Held in state and sent back on every later request. Without it each message from
+   * this still-mounted page arrived with no conversationId and the server opened a
+   * NEW conversation for it, so a dashboard session scattered its turns across
+   * several conversations while the URL claimed one. pushState alone did not fix
+   * that: it rewrites the address bar without remounting, so the request body was
+   * never updated.
+   *
+   * The server sets the header on failures too, which is what stops a retry after a
+   * 503 from starting a second conversation.
+   */
+  const [conversationId, setConversationId] = useState<string | null>(null);
+
   // A chat started from a project workspace arrives as ?project=<id>. The server
   // re-checks ownership before filing the conversation, so this is a hint, not a grant.
   const searchParams = useSearchParams();
@@ -72,10 +88,13 @@ function ChatWorkspace(): React.ReactElement {
     api: "/api/chat",
     // Read at request time, so switching models takes effect on the next message
     // without remounting the chat or losing any history.
-    body: { model: modelId, projectId },
+    body: { model: modelId, projectId, conversationId },
     onResponse: (response) => {
       const id = response.headers.get("x-conversation-id");
       if (id) {
+        // Recorded before the address bar is touched: this is what keeps the rest of
+        // the session, and any retry, inside the same conversation.
+        setConversationId(id);
         window.history.pushState({}, "", `/chat/${id}`);
       }
     },
