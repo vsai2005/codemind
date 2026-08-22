@@ -2,7 +2,12 @@
   "name": "task-saas",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
+    "migrate:deploy": "prisma migrate deploy",
+    "migrate:status": "prisma migrate status",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",

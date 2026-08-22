@@ -104,7 +104,7 @@ function readLimit(name: AiLimitName): LimitRead {
   if (Number.isNaN(parsed) || parsed <= 0) {
     return {
       value: fallback,
-      problem: `${envName} is not a positive integer; using the default of ${fallback.toLocaleString()}.`,
+      problem: `${envName} is not a positive integer; using the default of ${fallback.toLocaleString("en-US")}.`,
     };
   }
 
@@ -112,7 +112,7 @@ function readLimit(name: AiLimitName): LimitRead {
     const clamped = Math.min(Math.max(parsed, min), max);
     return {
       value: clamped,
-      problem: `${envName}=${parsed.toLocaleString()} is outside the supported range ${min.toLocaleString()}–${max.toLocaleString()}; clamped to ${clamped.toLocaleString()}.`,
+      problem: `${envName}=${parsed.toLocaleString("en-US")} is outside the supported range ${min.toLocaleString("en-US")}–${max.toLocaleString("en-US")}; clamped to ${clamped.toLocaleString("en-US")}.`,
     };
   }
 
@@ -136,6 +136,82 @@ export function getOutputTokenLimit(): number {
  */
 export function getArtifactOutputTokenLimit(): number {
   return readLimit("artifactMaxOutputTokens").value;
+}
+
+// ---------------------------------------------------------------------------
+// HTTP request size limits
+// ---------------------------------------------------------------------------
+
+/**
+ * Shipped defaults, sized for a 512MB instance (Render's free plan).
+ *
+ * These bound how many bytes the process holds at once, which is a property of the
+ * MACHINE, not of the product — so they are deliberately conservative by default and
+ * raised through the environment on a larger instance, rather than shipping a generous
+ * value that can exhaust a small one.
+ *
+ * They are unrelated to the AI context window above. A full 512,000-token turn is
+ * roughly 2,000,000 characters and fits comfortably inside both.
+ *
+ * Reference points for the aggregate character limit:
+ *   ~2,000,000 chars    a maximum-size single message (the full context window)
+ *  ~14,000,000 chars    one 10MB image attachment, base64-encoded (inflates 4:3)
+ */
+export const HTTP_LIMIT_DEFAULTS = {
+  /** Transport ceiling for POST /api/chat, checked before the body is read. */
+  chatBodyBytes: 20 * 1024 * 1024,
+  /** Total characters across every message in one request. */
+  totalRequestChars: 16_000_000,
+} as const;
+
+export const HTTP_LIMIT_BOUNDS = {
+  chatBodyBytes: { min: 1024 * 1024, max: 512 * 1024 * 1024 },
+  totalRequestChars: { min: 100_000, max: 400_000_000 },
+} as const;
+
+type HttpLimitName = keyof typeof HTTP_LIMIT_DEFAULTS;
+
+const HTTP_LIMIT_ENV_VARS: Record<HttpLimitName, string> = {
+  chatBodyBytes: "CODEMIND_CHAT_BODY_MAX_BYTES",
+  totalRequestChars: "CODEMIND_REQUEST_MAX_CHARS",
+};
+
+/** Same read-and-clamp behaviour as the AI limits; empty means "not configured". */
+function readHttpLimit(name: HttpLimitName): LimitRead {
+  const envName = HTTP_LIMIT_ENV_VARS[name];
+  const raw = process.env[envName];
+  const { min, max } = HTTP_LIMIT_BOUNDS[name];
+  const fallback = HTTP_LIMIT_DEFAULTS[name];
+
+  if (!raw || raw.trim().length === 0) return { value: fallback, problem: null };
+
+  const parsed = Number.parseInt(raw.trim(), 10);
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    return {
+      value: fallback,
+      problem: `${envName} is not a positive integer; using the default of ${fallback.toLocaleString("en-US")}.`,
+    };
+  }
+
+  if (parsed < min || parsed > max) {
+    const clamped = Math.min(Math.max(parsed, min), max);
+    return {
+      value: clamped,
+      problem: `${envName}=${parsed.toLocaleString("en-US")} is outside the supported range ${min.toLocaleString("en-US")}–${max.toLocaleString("en-US")}; clamped to ${clamped.toLocaleString("en-US")}.`,
+    };
+  }
+
+  return { value: parsed, problem: null };
+}
+
+/** Bytes accepted on POST /api/chat before the body is parsed. */
+export function getChatBodyLimitBytes(): number {
+  return readHttpLimit("chatBodyBytes").value;
+}
+
+/** Characters accepted across all messages in one chat request. */
+export function getTotalRequestChars(): number {
+  return readHttpLimit("totalRequestChars").value;
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +278,24 @@ export function validateEnv(): EnvReport {
   const output = getOutputTokenLimit();
   if (output >= context) {
     warnings.push(
-      `AI_MAX_OUTPUT_TOKENS (${output.toLocaleString()}) is not smaller than AI_CONTEXT_MAX_TOKENS (${context.toLocaleString()}). No room is left for the prompt; every request will fail.`
+      `AI_MAX_OUTPUT_TOKENS (${output.toLocaleString("en-US")}) is not smaller than AI_CONTEXT_MAX_TOKENS (${context.toLocaleString("en-US")}). No room is left for the prompt; every request will fail.`
+    );
+  }
+
+  for (const name of Object.keys(HTTP_LIMIT_DEFAULTS) as HttpLimitName[]) {
+    const { problem } = readHttpLimit(name);
+    if (problem) warnings.push(problem);
+  }
+
+  // The transport limit must stay above the character limit, or the byte check rejects
+  // payloads the schema would have accepted and the failure looks like a bug rather
+  // than a limit. One character is at least one byte, so comparing them directly is
+  // the correct conservative test.
+  const chatBytes = getChatBodyLimitBytes();
+  const requestChars = getTotalRequestChars();
+  if (chatBytes <= requestChars) {
+    warnings.push(
+      `CODEMIND_CHAT_BODY_MAX_BYTES (${chatBytes.toLocaleString("en-US")}) is not above CODEMIND_REQUEST_MAX_CHARS (${requestChars.toLocaleString("en-US")}). Requests the schema would accept will be rejected as oversized before they are parsed. Raise the byte limit or lower the character limit.`
     );
   }
 

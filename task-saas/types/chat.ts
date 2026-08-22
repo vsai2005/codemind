@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { MAX_ATTACHMENTS_PER_MESSAGE, MAX_DOCUMENT_CHARS, MAX_IMAGE_BYTES } from "@/lib/attachments";
+import { getTotalRequestChars } from "@/lib/env";
 
 /**
  * Request validation for POST /api/chat.
@@ -31,12 +32,16 @@ export const MAX_MESSAGE_CHARS = 2_000_000;
  * each is 400MB, and `req.json()` allocates all of it before Zod sees the first field.
  * This is what actually bounds the payload.
  *
- * Sized to hold a full 512K-token current message (~2M chars), a long conversation
- * history, and one or two base64 image attachments (~14M chars per 10MB image) with
- * room to spare. It sits below BODY_LIMITS.chat so the transport limit never rejects
- * something this schema would have accepted — the two must move together.
+ * Environment-configurable via CODEMIND_REQUEST_MAX_CHARS, because the right value
+ * depends on how much memory the instance has. The default holds a full 512K-token
+ * message (~2M chars) plus a long history and one base64 image attachment (~14M chars
+ * per 10MB image). It must stay below the chat body limit so the transport check never
+ * rejects something this schema would have accepted; `validateEnv` warns if that
+ * ordering is broken.
+ *
+ * Re-exported from lib/env.ts so there is one definition and one default.
  */
-export const MAX_TOTAL_REQUEST_CHARS = 32_000_000;
+export { getTotalRequestChars };
 
 /** Base64 inflates by ~4/3; allow the data URL prefix on top. */
 const MAX_IMAGE_URL_CHARS = Math.ceil((MAX_IMAGE_BYTES * 4) / 3) + 128;
@@ -102,15 +107,19 @@ export const chatRequestSchema = z
     message: "the last message must be a user message",
     path: ["messages"],
   })
-  .refine(
-    (data) =>
-      data.messages.reduce((total, message) => total + message.content.length, 0) <=
-      MAX_TOTAL_REQUEST_CHARS,
-    {
-      message: `the conversation exceeds the ${MAX_TOTAL_REQUEST_CHARS.toLocaleString()} character limit for a single request`,
-      path: ["messages"],
+  // superRefine rather than refine: the limit is read per parse so it tracks the
+  // environment, and the message quotes the value actually in force.
+  .superRefine((data, ctx) => {
+    const limit = getTotalRequestChars();
+    const total = data.messages.reduce((sum, message) => sum + message.content.length, 0);
+    if (total > limit) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `the conversation exceeds the ${limit.toLocaleString("en-US")} character limit for a single request`,
+        path: ["messages"],
+      });
     }
-  );
+  });
 
 export type ChatMessageInput = z.infer<typeof chatMessageSchema>;
 export type ChatRequest = z.infer<typeof chatRequestSchema>;

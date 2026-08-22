@@ -219,18 +219,25 @@ and `request.formData()` fully materialise a body in memory before any schema se
 so the size check has to happen before parsing. `lib/http/body-limit.ts` reads
 `Content-Length` and returns **413** before the body is read.
 
-| Endpoint | Limit |
-| --- | --- |
-| `POST /api/chat` | 48 MB |
-| `POST /api/upload` | 12 MB |
-| `PATCH /api/projects/:id` | 2 MB |
-| Everything else | 256 KB |
+| Endpoint | Limit | Configurable |
+| --- | --- | --- |
+| `POST /api/chat` | 20 MB | `CODEMIND_CHAT_BODY_MAX_BYTES` |
+| `POST /api/upload` | 12 MB | fixed |
+| `PATCH /api/projects/:id` | 2 MB | fixed |
+| Everything else | 256 KB | fixed |
 
-The chat limit is generous on purpose — a full 512K-token turn is roughly 2MB of text,
-and image attachments travel inside the message as base64 data URLs. It is paired with
-`MAX_TOTAL_REQUEST_CHARS` (32,000,000) in `types/chat.ts`, which bounds the aggregate
-across all messages; the per-message cap alone never bounded the request. **Keep the
-two in step**, with the transport limit above the character limit.
+The chat limit is the only one that scales with the host, because it is the only one
+large enough to matter against a small instance's memory. It is paired with
+`CODEMIND_REQUEST_MAX_CHARS` (default 16,000,000), which bounds the aggregate across
+all messages — the per-message cap alone never bounded the request.
+
+Both defaults are sized for a 512 MB instance and hold everything real: a full
+512K-token message is about 2,000,000 characters, and one 10 MB image attachment is
+about 14,000,000 as base64. Raise them on a larger machine; no rebuild is needed.
+
+**The byte limit must stay above the character limit**, or the transport check rejects
+payloads the schema would have accepted. `validateEnv` warns at startup if that
+ordering is broken.
 
 ---
 
@@ -358,7 +365,115 @@ npm run test
 
 ---
 
-## Production deployment
+## Deploying to Render + Aiven
+
+This is the recommended hosted setup, and `render.yaml` at the repository root
+configures it.
+
+### It deploys as ONE service
+
+CodeMind is a single Next.js application. The UI and the 14 routes under `app/api`
+are the same build, the same process and the same origin — `useChat` calls `/api/chat`
+as a relative path, and NextAuth's session is a same-origin cookie.
+
+It therefore **cannot be split** into a Vercel frontend and a separate backend without
+extracting every route handler into a standalone server and re-architecting auth for
+cross-origin cookies. That is a rewrite, not a deployment step.
+
+Render is the better single-platform target for this codebase because it runs one
+long-lived process, which is what three parts of the design assume:
+
+- `lib/rate-limit.ts` keeps counters in process memory
+- `lib/ai/key-scheduler.ts` tracks per-key load and cooldowns in process memory
+- chat and artifact generation stream for as long as the model takes
+
+On a serverless platform each of those degrades: counters and key load become
+per-instance, so limits multiply by instance count and key balancing goes blind, and
+streams are bounded by a function timeout.
+
+### Steps
+
+**1. Create the Aiven PostgreSQL service.** Copy the connection URI from its console
+and keep the `?sslmode=require` — Aiven requires TLS.
+
+**2. Apply migrations from your machine, before the first deploy:**
+```bash
+DATABASE_URL="<aiven-uri>" npm run migrate:deploy
+DATABASE_URL="<aiven-uri>" npm run migrate:status
+```
+Migrations are deliberately **not** run by the container or by a Render pre-deploy
+command. Next's standalone output prunes the Prisma CLI (a devDependency) from the
+runtime image, so a pre-deploy step would have to fetch it from npm on every deploy as
+a non-root user. Running it yourself also preserves the property the Dockerfile was
+written for: a restart can never mutate the database.
+
+**3. Create the Render service** from this repository. With `render.yaml` present,
+Render offers a Blueprint — accept it. Otherwise: New → Web Service, Docker runtime,
+root directory `task-saas`, health check path `/api/health`.
+
+**4. Set the secrets** Render prompts for: `DATABASE_URL`, `AUTH_SECRET`, and at least
+one `NVIDIA_API_KEY_*`. `AUTH_TRUST_HOST`, `CODEMIND_TRUSTED_PROXY_HOPS=1` and
+`CODEMIND_DEMO_AUTH=false` are already set in the blueprint.
+
+**5. Deploy, then check the logs** for `Environment validated`. Startup aborts on a
+missing `DATABASE_URL` or a short `AUTH_SECRET`, naming the variable.
+
+**6. Set `AUTH_URL`** to the URL Render assigned (e.g. `https://codemind.onrender.com`)
+and redeploy, so auth callbacks and secure cookies resolve.
+
+**7. Smoke-test:** sign up, send one message, generate one artifact.
+
+### Notes
+
+`CODEMIND_TRUSTED_PROXY_HOPS=1` is not optional on Render. Render terminates TLS and
+forwards, so without it `x-forwarded-for` is ignored and every unauthenticated request
+shares one rate-limit bucket. See "Trusted proxies" above.
+
+`/api/health` is a liveness probe only — it reports that the process is serving and
+does not query the database. A health check that failed on a database blip would make
+Render restart an instance that had nothing wrong with it.
+
+Scaling past one instance is a real change, not a slider: the rate limiter and the key
+scheduler both need shared state (Redis) first.
+
+### Running on the free plan
+
+`render.yaml` specifies `plan: free`. Two consequences are inherent to it:
+
+**Spin-down.** The instance sleeps after roughly 15 minutes without inbound requests
+and cold-starts on the next one. A Docker image takes a while to come back, so the
+first request after an idle period is slow — noticeably so from a phone. Nothing is
+lost, but in-memory state resets: rate-limit counters start from zero (more permissive,
+not broken) and the AI key scheduler reloads with no memory of which keys were in
+cooldown. Render's own health checks do not prevent spin-down.
+
+**512 MB of memory.** The request size limits are sized for this, and are
+environment-configurable so a larger instance does not need a code change:
+
+| Variable | Default | Raise it when |
+| --- | --- | --- |
+| `CODEMIND_CHAT_BODY_MAX_BYTES` | 20 MB | you move to an instance with more memory |
+| `CODEMIND_REQUEST_MAX_CHARS` | 16,000,000 | same |
+
+Why these numbers: with a Next.js standalone server and the Prisma engine resident
+(~200–250 MB idle), a maximum-size chat request costs roughly double its byte size once
+buffered and parsed. At 20 MB the worst case lands near 60 MB, leaving headroom for the
+32 MB that `scrypt` may use per concurrent sign-in and the three generations
+`MAX_CONCURRENT_GENERATIONS_PER_USER` allows in flight per user.
+
+The defaults still fit everything real: a full 512K-token message is about **2,000,000
+characters** and one 10 MB image attachment is about **14,000,000 characters** as
+base64, so both together fit inside 16,000,000. What the default excludes is two or
+more 10 MB images in a single message — and `prepareUserMessage` only ever decodes the
+first image anyway, so that capacity was never used.
+
+Both are read per request, so raising them on a bigger instance takes effect without a
+rebuild. Startup clamps out-of-range values and warns if the byte limit is not above
+the character limit, which would otherwise reject payloads the schema accepts.
+
+---
+
+## Production deployment (self-hosted)
 
 CodeMind deploys as a standard Next.js application. Every secret is supplied through
 environment variables at runtime — nothing sensitive lives in the repository, the

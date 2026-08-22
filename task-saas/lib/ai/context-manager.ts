@@ -405,7 +405,7 @@ export class ContextManager {
     if (queryTokens > budget) {
       throw new ContextOverflowError(
         `This message is too large for the model's context window on its own ` +
-          `(about ${queryTokens.toLocaleString()} tokens, limit ${budget.toLocaleString()}). ` +
+          `(about ${queryTokens.toLocaleString("en-US")} tokens, limit ${budget.toLocaleString("en-US")}). ` +
           `It has not been truncated. Please split it into smaller parts, or attach large ` +
           `files instead of pasting them so CodeMind can retrieve only the relevant sections.`,
         queryTokens,

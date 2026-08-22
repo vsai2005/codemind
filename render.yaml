@@ -1,0 +1,94 @@
+# Render Blueprint — CodeMind
+#
+# CodeMind is ONE Next.js application: the UI and the 14 API routes under app/api
+# are the same build, the same process and the same origin. It deploys as a single
+# web service, not as a frontend/backend pair.
+#
+# Docker rather than Render's Node runtime, deliberately: the repository already has a
+# production Dockerfile (non-root user, standalone output, openssl for Prisma's musl
+# engine, pdfkit left unbundled so its font metrics resolve). Using it means the image
+# Render runs is the image you can run locally.
+#
+# MIGRATIONS ARE NOT RUN HERE. There is no preDeployCommand, because the Prisma CLI is
+# a devDependency and Next's standalone output prunes it from the runtime image — a
+# pre-deploy step would have to fetch it from npm on every deploy, as a non-root user.
+# Run `npm run migrate:deploy` against Aiven from your machine instead. This also keeps
+# the property the Dockerfile was written for: a restart can never mutate the database.
+#
+# Every secret below is `sync: false`, so Render prompts for it once and stores it
+# encrypted. No value is committed to this file.
+
+services:
+  - type: web
+    name: codemind
+    runtime: docker
+    # Free tier. Two consequences worth knowing, both inherent to the plan:
+    #
+    #   Spin-down   the instance sleeps after ~15 minutes idle and cold-starts on the
+    #               next request. In-memory state does not survive: rate-limit counters
+    #               reset (more permissive, not broken) and the AI key scheduler
+    #               reloads with no record of which keys were cooling down.
+    #   Memory      512 MB. The request size defaults (CODEMIND_CHAT_BODY_MAX_BYTES
+    #               and CODEMIND_REQUEST_MAX_CHARS) are already sized for this, so
+    #               nothing needs setting here. On a larger instance raise them in the
+    #               dashboard — no code change or rebuild.
+    #
+    # Change to `starter` to keep one process warm and get more headroom.
+    plan: free
+    # Put this in the region closest to your Aiven service — every request makes at
+    # least one database round trip.
+    region: oregon
+    rootDir: task-saas
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeploy: true
+
+    envVars:
+      # --- Required: the app aborts startup without these -------------------
+      # Aiven connection URI. Keep the ?sslmode=require that Aiven's console gives you.
+      - key: DATABASE_URL
+        sync: false
+      # At least 32 characters. Generate with: npx auth secret
+      - key: AUTH_SECRET
+        sync: false
+      # Required whenever the app is served from anything other than localhost.
+      - key: AUTH_TRUST_HOST
+        value: "true"
+
+      # --- Required for correct behaviour behind Render's proxy -------------
+      # Render terminates TLS and forwards, so x-forwarded-for carries exactly one
+      # trusted hop. Without this the header is ignored and every unauthenticated
+      # request shares a single rate-limit bucket. See README "Trusted proxies".
+      - key: CODEMIND_TRUSTED_PROXY_HOPS
+        value: "1"
+      # Never enable the shared passwordless demo account on a public host.
+      - key: CODEMIND_DEMO_AUTH
+        value: "false"
+      # Set to the service's public URL after the first deploy assigns one, so auth
+      # callbacks and secure cookies resolve correctly. Then redeploy.
+      - key: AUTH_URL
+        sync: false
+
+      # --- Provider keys: at least one NVIDIA key is required ---------------
+      - key: NVIDIA_API_KEY_1
+        sync: false
+      - key: NVIDIA_API_KEY_2
+        sync: false
+      - key: NVIDIA_API_KEY_3
+        sync: false
+      - key: NVIDIA_API_KEY_4
+        sync: false
+      - key: NVIDIA_API_KEY_5
+        sync: false
+
+      # --- Optional providers: an absent key just marks that model unavailable
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: DEEPSEEK_API_KEY
+        sync: false
+
+# Token limits (AI_CONTEXT_MAX_TOKENS, AI_MAX_OUTPUT_TOKENS,
+# AI_ARTIFACT_MAX_OUTPUT_TOKENS) are deliberately omitted. Their shipped defaults in
+# lib/env.ts are the documented production values; set them in the Render dashboard
+# only to override.

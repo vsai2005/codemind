@@ -10,26 +10,21 @@
  *
  * These are HTTP transport limits and are deliberately NOT the AI context limit. The
  * 512,000-token context window is about what the model is asked to read; this is about
- * how many bytes the process will hold at once. They are sized so that every request
- * CodeMind actually makes fits comfortably.
+ * how many bytes the process will hold at once.
+ *
+ * The chat limit is environment-configurable because it is the one that scales with
+ * the host rather than with the product — see `bodyLimitBytes` below. Its default is
+ * sized for a 512MB instance; a larger machine raises it without a code change.
  */
 
 import { logger } from "@/lib/logger";
+import { getChatBodyLimitBytes } from "@/lib/env";
 
-export const BODY_LIMITS = {
-  /**
-   * POST /api/chat.
-   *
-   * A full 512K-token turn is roughly 2MB of UTF-8 text, and the client re-sends the
-   * conversation each turn, so the text side needs a few MB at most. The rest is
-   * headroom for image attachments, which travel inside the message as base64 data
-   * URLs and inflate 4:3.
-   *
-   * Kept above MAX_TOTAL_REQUEST_CHARS in types/chat.ts so the transport limit never
-   * rejects a payload the schema would have accepted. The two must move together.
-   */
-  chat: 48 * 1024 * 1024,
-
+/**
+ * Fixed limits. These bound small, well-understood payloads whose size is a property
+ * of the schema rather than of the machine, so there is nothing to tune per instance.
+ */
+const FIXED_LIMITS = {
   /** POST /api/upload — one file up to 10MB, plus multipart framing. */
   upload: 12 * 1024 * 1024,
 
@@ -43,7 +38,29 @@ export const BODY_LIMITS = {
   projectSettings: 2 * 1024 * 1024,
 } as const;
 
-export type BodyLimitName = keyof typeof BODY_LIMITS;
+export type BodyLimitName = "chat" | keyof typeof FIXED_LIMITS;
+
+/**
+ * The byte ceiling for one endpoint.
+ *
+ * `chat` is the only limit that scales with the host, because it is the only one large
+ * enough to matter against a small instance's memory: a full 512K-token turn plus a
+ * base64 image attachment. It comes from CODEMIND_CHAT_BODY_MAX_BYTES, defaulting to a
+ * value sized for a 512MB instance and raised through the environment on a larger one.
+ * See README "Request size limits".
+ *
+ * Read per call rather than captured at module load, so the value tracks the
+ * environment without needing a rebuild.
+ */
+export function bodyLimitBytes(name: BodyLimitName): number {
+  return name === "chat" ? getChatBodyLimitBytes() : FIXED_LIMITS[name];
+}
+
+/**
+ * Fixed limits only, exported for tests and callers that need a compile-time value.
+ * Use `bodyLimitBytes()` for anything that must respect the environment.
+ */
+export const BODY_LIMITS = FIXED_LIMITS;
 
 /**
  * Reject an oversized request before its body is read.
@@ -57,7 +74,7 @@ export type BodyLimitName = keyof typeof BODY_LIMITS;
  * attacker gains rather than a gap in normal operation.
  */
 export function enforceBodyLimit(request: Request, name: BodyLimitName): Response | null {
-  const limit = BODY_LIMITS[name];
+  const limit = bodyLimitBytes(name);
   const header = request.headers.get("content-length");
   if (!header) return null;
 
