@@ -132,6 +132,55 @@ describe("detectArtifactIntent", () => {
     }
   });
 
+  describe("accepts the phrasings people actually type", () => {
+    // Probed against real phrasings after the first fix still missed 10 of 17.
+    // The gaps were structural: AS_PDF and IN_PDF both demanded an article, and
+    // DELIVERY knew "give me" but not "give it to me", "i want" or "make me".
+    for (const prompt of [
+      "can you create a pdf",
+      "make me a pdf",
+      "i want a pdf",
+      "i need it as a pdf file",
+      "can u make pdf",
+      "give it to me as pdf",
+      "as pdf",
+      "in pdf",
+      "send it in pdf",
+      "convert this to pdf",
+      "can you give me the pdf",
+      "do it in pdf format",
+      "pdf format",
+      "export as pdf",
+    ]) {
+      it(`handles ${JSON.stringify(prompt)}`, () => {
+        expect(detectArtifactIntent(prompt)?.type).toBe("pdf");
+      });
+    }
+  });
+
+  describe("descriptive mentions of PDFs are still not requests", () => {
+    // The lookahead in IN_PDF exists for these: "in pdf files" describes PDFs,
+    // "in pdf" asks for one.
+    for (const prompt of [
+      "how text is stored in pdf files",
+      "which pdf readers do you recommend",
+      "the pdf was corrupted",
+      "i opened a pdf yesterday",
+      "explain how pdf compression works",
+    ]) {
+      it(`returns null for ${JSON.stringify(prompt)}`, () => {
+        expect(detectArtifactIntent(prompt)).toBeNull();
+      });
+    }
+
+    it("leaves 'pdf please' alone, one word from the bare noun", () => {
+      // Deliberate. Treating a politeness marker as evidence of intent is weak, and
+      // a miss now degrades gracefully: the model answers and invites the user to
+      // ask for the download explicitly.
+      expect(detectArtifactIntent("pdf please")).toBeNull();
+    });
+  });
+
   describe("the word pdf alone never triggers generation", () => {
     for (const prompt of [
       "pdf",

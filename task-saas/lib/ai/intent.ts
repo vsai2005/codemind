@@ -46,9 +46,15 @@ function normalizeForIntent(text: string): string {
   );
 }
 
-/** Phrases that mean "hand me a deliverable", as opposed to "explain/write it out". */
+/**
+ * Phrases that mean "hand me a deliverable", as opposed to "explain/write it out".
+ *
+ * The object matters as much as the verb: "give me", "give it to me" and "make me" are
+ * all requests, and only listing "give me" missed most of them. "i want" / "i need"
+ * are included because they are how people actually ask.
+ */
 const DELIVERY =
-  /\b(give me|send me|hand me|provide me|get me|download|downloadable|export|package (?:it|this|them|the)|bundle|zip (?:it|this|them|up)|as an? (?:file|download|zip|pdf|attachment)|i want the files?)\b/;
+  /\b((?:give|send|hand|provide|get|make)\s+(?:me|us|it|this|that|them)\b|(?:give|send|hand)\s+it\s+to\s+(?:me|us)\b|i\s+(?:want|need|would like)\b|download|downloadable|export|package (?:it|this|them|the)|bundle|zip (?:it|this|them|up)|as an? (?:file|download|zip|pdf|attachment)|i want the files?)\b/;
 
 /** Phrases that mean "render it in the conversation". Suppresses artifact generation. */
 const SHOW_INLINE =
@@ -59,15 +65,23 @@ const PROJECT_NOUN =
 
 const ZIP_NOUN = /\bzips?\b|\.zip\b/;
 const PDF_NOUN = /\bpdfs?\b|\.pdf\b/;
-const AS_PDF = /\b(?:as|into|to)\s+an?\s+pdf\b/;
+/** The article is optional — "as pdf" is written as often as "as a pdf". */
+const AS_PDF = /\b(?:as|into|to)\s+(?:an?\s+|the\s+)?pdf\b/;
 
 /**
  * "give me in the pdf", "put the code in a pdf", "inside the pdf".
  *
  * Natural phrasing that AS_PDF does not cover: people say "in the PDF" at least as
  * often as "as a PDF", and the request is equally explicit.
+ *
+ * The negative lookahead keeps descriptive sentences out. "how text is stored in pdf
+ * files" is about PDFs, not a request for one; "put it in pdf" is a request.
  */
-const IN_PDF = /\b(?:in|inside|within)\s+(?:an?|the)\s+pdf\b/;
+const IN_PDF =
+  /\b(?:in|inside|within)\s+(?:an?\s+|the\s+)?pdf\b(?!\s+(?:files?|documents?|readers?|viewers?|format\s+the))/;
+
+/** "in pdf format", "pdf format please" — a format request, not a passing mention. */
+const PDF_FORMAT = /\bpdf\s+format\b/;
 const PDF_PRODUCE_VERB = /\b(export|generate|create|make|write|turn|produce|render|convert)\b/;
 
 const SCRIPT_NOUN = /\b(scripts?|files?|components?|modules?)\b/;
@@ -116,7 +130,11 @@ export function detectArtifactIntent(rawText: unknown): ArtifactIntent | null {
   // one. It must be paired with evidence the user wants to RECEIVE a PDF.
   if (
     PDF_NOUN.test(text) &&
-    (wantsDelivery || AS_PDF.test(text) || IN_PDF.test(text) || PDF_PRODUCE_VERB.test(text))
+    (wantsDelivery ||
+      AS_PDF.test(text) ||
+      IN_PDF.test(text) ||
+      PDF_FORMAT.test(text) ||
+      PDF_PRODUCE_VERB.test(text))
   ) {
     return { type: "pdf", reason: "explicit pdf request" };
   }
