@@ -84,6 +84,25 @@ function isProviderTimeoutError(error: unknown): boolean {
   );
 }
 
+/**
+ * A token count only when the provider actually reported one, otherwise null.
+ *
+ * This guard is load-bearing, not defensive decoration. The AI SDK's
+ * OpenAI-compatible streaming path initialises usage to `NaN` and only replaces it
+ * on receiving a usage chunk, which an endpoint sends only when the request set
+ * `stream_options.include_usage` — and @ai-sdk/openai sends that only under
+ * `compatibility: "strict"`. NVIDIA is strict and does report; Google and DeepSeek
+ * are still "compatible" and still arrive as NaN. `NaN` into an Int column is a
+ * write error rather than a null, so every provider has to pass through here.
+ *
+ * Null therefore means "the provider did not report", never "zero tokens".
+ */
+function toTokenCount(value: number | undefined | null): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.round(value)
+    : null;
+}
+
 /** True when every provider key was busy or cooling down. */
 function isNoCapacityError(error: unknown): boolean {
   const body = (error as { responseBody?: unknown })?.responseBody;
@@ -484,33 +503,82 @@ export async function POST(req: Request): Promise<Response> {
         maxTokens: resolved.effectiveOutputTokens,
         maxRetries: SDK_RETRIES,
         ...modelOptions,
-        async onFinish({ text }) {
-          await prisma.message.create({
-            data: { conversationId: activeConversationId, role: "user", content: originalRawContent },
-          });
-          await prisma.message.create({
-            data: {
-              conversationId: activeConversationId,
-              role: "assistant",
-              content: text,
-              // Each message keeps the identity of the model that produced it, so a
-              // conversation can mix models without rewriting earlier turns.
-              provider: resolved.descriptor.provider,
-              model: effectiveProviderModelId,
-              // Persisted so the plan is still there after a reload.
-              plan: plan ? (plan as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
-            },
-          });
-          // Keep the sidebar's "most recent" ordering honest. updateMany so the
-          // owner is part of the filter the database enforces.
-          await prisma.conversation.updateMany({
-            where: { id: activeConversationId, userId },
-            data: { updatedAt: new Date() },
-          });
+        // The user's message is NOT written here — it is persisted before the stream
+        // starts (see below). This callback writes the assistant side only.
+        async onFinish({ text, usage }) {
+          // Guarded because this runs after the reply has already been streamed to
+          // the browser. An unguarded throw propagates into the AI SDK, which calls
+          // controller.error() on a stream the user has already read: the reply
+          // vanishes on reload, the stream breaks at the last moment, and nothing is
+          // logged. Failing to record a turn must not also destroy it.
+          try {
+            const promptTokens = toTokenCount(usage?.promptTokens);
+            const completionTokens = toTokenCount(usage?.completionTokens);
 
-          await summarizeDropped(activeConversationId, userId, existingSummary, ctx.droppedMessagesContent);
+            // One transaction: an assistant reply with no updatedAt bump sorts to the
+            // bottom of the sidebar, and a bump with no message under it shows an
+            // empty conversation. Either half alone is a state the UI reads as
+            // corruption, so they commit together or not at all.
+            await prisma.$transaction([
+              prisma.message.create({
+                data: {
+                  conversationId: activeConversationId,
+                  role: "assistant",
+                  content: text,
+                  // Each message keeps the identity of the model that produced it, so a
+                  // conversation can mix models without rewriting earlier turns.
+                  provider: resolved.descriptor.provider,
+                  model: effectiveProviderModelId,
+                  // Persisted so the plan is still there after a reload.
+                  plan: plan ? (plan as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
+                  promptTokens,
+                  completionTokens,
+                },
+              }),
+              // Keep the sidebar's "most recent" ordering honest. updateMany so the
+              // owner is part of the filter the database enforces.
+              prisma.conversation.updateMany({
+                where: { id: activeConversationId, userId },
+                data: { updatedAt: new Date() },
+              }),
+            ]);
+
+            logger.debug("Turn persisted", {
+              conversationId: activeConversationId,
+              model: effectiveProviderModelId,
+              // Null whenever the provider reported nothing; see toTokenCount.
+              promptTokens,
+              completionTokens,
+            });
+
+            await summarizeDropped(activeConversationId, userId, existingSummary, ctx.droppedMessagesContent);
+          } catch (error) {
+            // Logged and swallowed. Rethrowing would error the stream the user is
+            // already reading, turning a bookkeeping failure into a visible one.
+            logger.error("Failed to persist assistant turn", {
+              conversationId: activeConversationId,
+              error: scrubForLog(error instanceof Error ? error.message : "unknown"),
+            });
+          }
         },
       });
+
+    // The user's own message is written BEFORE generation starts.
+    //
+    // It used to be written inside onFinish alongside the reply, so every failure
+    // between here and a fully-read stream discarded it: the 503 no-capacity branch,
+    // the 504 timeout, a context rejection that survives the bounded retry, and a
+    // client disconnect mid-stream all return without onFinish ever running. The
+    // user reloaded and their own prompt was simply gone.
+    //
+    // Deliberately placed here rather than immediately after validation: the artifact
+    // branch above persists its own turn through persistTurn(), and writing earlier
+    // would duplicate the user message on every artifact request. Everything between
+    // validation and this line either persists the turn itself or rejects before any
+    // generation was attempted.
+    await prisma.message.create({
+      data: { conversationId: activeConversationId, role: "user", content: originalRawContent },
+    });
 
     let result: Awaited<ReturnType<typeof startStream>>;
     try {

@@ -179,6 +179,20 @@ model Message {
   /// valid. Contains a specification, never model reasoning.
   plan Json?
 
+  /// Tokens the provider reported for this turn. Assistant messages only.
+  ///
+  /// Nullable because population is PER PROVIDER. A provider reports usage on the
+  /// streaming path only when the request set stream_options.include_usage, which
+  /// @ai-sdk/openai sends only under `compatibility: "strict"`. NVIDIA is set to
+  /// strict and verified populating against the live API; Google and DeepSeek are
+  /// still "compatible" and so still write null here.
+  ///
+  /// Null therefore means "not reported", never "zero".
+  ///
+  /// Visibility only. No pricing, cost or spend logic reads these.
+  promptTokens     Int?
+  completionTokens Int?
+
   artifacts Artifact[]
 
   @@index([conversationId])
