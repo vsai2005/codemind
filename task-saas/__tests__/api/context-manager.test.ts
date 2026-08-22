@@ -327,14 +327,40 @@ describe("ContextManager.buildContext", () => {
      * separate what the MODEL cannot do from what CODEMIND can.
      */
     it("does not claim the product cannot produce downloads", () => {
+      // Matched on meaning rather than exact wording: this paragraph has been
+      // rewritten three times, once per failure mode, and a brittle string match
+      // fails on rewording instead of on regression.
       const prompt = promptFor();
-      expect(prompt).toMatch(/CodeMind itself CAN produce downloads/i);
-      expect(prompt).toMatch(/never tell the user a PDF, ZIP or file cannot be created/i);
+      expect(prompt).toMatch(/codemind can produce downloads/i);
+      expect(prompt).toMatch(/never say a download cannot be created/i);
     });
 
     it("contains no blanket statement that a file cannot be created", () => {
       // The exact phrasing that produced the refusal.
       expect(promptFor()).not.toMatch(/you cannot .{0,20}create a file/i);
+    });
+
+    /**
+     * The third failure, produced by fixing the second. Told the pipeline exists, the
+     * model narrated as though it were running - "the server-side pipeline will now
+     * package it, you'll receive the download shortly" - and no file ever arrived.
+     *
+     * The model cannot otherwise know this: intent detection runs in the route BEFORE
+     * it is called, so a chat reply existing at all means the pipeline declined.
+     */
+    it("forbids promising a download that is not coming", () => {
+      const prompt = promptFor();
+      expect(prompt).toMatch(/never say a download is being created/i);
+      expect(prompt).toMatch(/on its way|will arrive shortly/i);
+    });
+
+    it("explains why no download is coming, not just that it is not", () => {
+      // Without the reason the instruction is arbitrary and the model drifts back.
+      expect(promptFor()).toMatch(/already decided this was not a download request/i);
+    });
+
+    it("routes the user to the phrasing that does reach the pipeline", () => {
+      expect(promptFor()).toMatch(/give me this as a PDF/i);
     });
 
     it("fits inside the reserve the budget subtracts for it", () => {
