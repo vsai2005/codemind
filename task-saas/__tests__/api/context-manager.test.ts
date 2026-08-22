@@ -91,8 +91,10 @@ describe("ContextManager.buildContext", () => {
 
   describe("coherent turn windowing", () => {
     it("drops whole USER→ASSISTANT turns, never an orphaned half", () => {
-      // Sized so the older turn cannot fit but the newer one can.
-      process.env.AI_CONTEXT_MAX_TOKENS = "512";
+      // Sized so the older turn cannot fit but the newer one can. Tracks
+      // SYSTEM_PROMPT_RESERVE: the window must clear reserve + output + margin
+      // before any history fits at all.
+      process.env.AI_CONTEXT_MAX_TOKENS = "620";
       process.env.AI_MAX_OUTPUT_TOKENS = "100";
 
       const historical = [
@@ -116,7 +118,7 @@ describe("ContextManager.buildContext", () => {
 
     it("keeps the retained window contiguous", () => {
       // Sized so the huge middle turn cannot fit, stranding everything older.
-      process.env.AI_CONTEXT_MAX_TOKENS = "512";
+      process.env.AI_CONTEXT_MAX_TOKENS = "620";
       process.env.AI_MAX_OUTPUT_TOKENS = "100";
 
       const historical = [
@@ -286,6 +288,45 @@ describe("ContextManager.buildContext", () => {
     });
   });
 
+  describe("system prompt guardrails", () => {
+    const promptFor = () =>
+      ContextManager.buildContext([], { id: "1", role: "user", content: "make me a pdf" } as any, null)
+        .systemPrompt;
+
+    /**
+     * Asked for a PDF on the plain chat path, the model invented a tool it does not
+     * have and streamed {"tool": "write_code", "arguments": {...}} into the reply,
+     * exhausting its output budget on escaped JSON. Forbidding artifact XML was not
+     * enough - the prohibition has to name tool-call syntax explicitly.
+     */
+    it("states that no tools are available", () => {
+      expect(promptFor()).toMatch(/no tools/i);
+    });
+
+    it("forbids tool-call and function-call syntax by name", () => {
+      const prompt = promptFor();
+      expect(prompt).toMatch(/tool-call or function-call syntax/i);
+      expect(prompt).toContain('{"tool": ...}');
+      expect(prompt).toContain('{"name": ..., "arguments": ...}');
+    });
+
+    it("still forbids artifact markup", () => {
+      const prompt = promptFor();
+      expect(prompt).toContain("<codemind_artifact>");
+      expect(prompt).toContain('<file path="..."');
+    });
+
+    it("tells the model what to do instead of inventing a mechanism", () => {
+      expect(promptFor()).toMatch(/fenced Markdown block/i);
+    });
+
+    it("fits inside the reserve the budget subtracts for it", () => {
+      // Under-reserving surfaces as an occasional context overflow rather than an
+      // obvious error, so this guards the number rather than trusting it.
+      expect(estimateTokens(promptFor())).toBeLessThanOrEqual(400);
+    });
+  });
+
   describe("project workspace context", () => {
     /**
      * The defect: project instructions and memory were capped at a share of the TOTAL
@@ -302,7 +343,7 @@ describe("ContextManager.buildContext", () => {
       // than the 5% ratio cap. That is the shape that broke: a remainder smaller than
       // the share each block was allowed to claim. A message that merely fits with room
       // to spare would pass under the old logic too and prove nothing.
-      const nearlyFull = "Q".repeat(10_100);
+      const nearlyFull = "Q".repeat(9_700);
 
       const result = ContextManager.buildContext(
         [],

@@ -15,8 +15,15 @@ import { getContextTokenLimit, getOutputTokenLimit } from "@/lib/env";
  * deletes history, it only chooses what the model sees this turn.
  */
 
-/** Flat reserve for the base persona prompt. */
-const SYSTEM_PROMPT_RESERVE = 300;
+/**
+ * Flat reserve for the base persona prompt (see `basePrompt` below).
+ *
+ * Measured, not guessed: the persona is ~1,000 characters / ~287 estimated tokens
+ * after the no-tools paragraph was added. 400 leaves room to reword it without
+ * silently under-reserving, which would show up as an occasional context overflow
+ * rather than an obvious error. Re-measure if the persona grows again.
+ */
+const SYSTEM_PROMPT_RESERVE = 400;
 
 /**
  * Held back so an estimator miss cannot push the request past the provider ceiling.
@@ -618,9 +625,20 @@ Durable facts about this project:
     // Conversational persona only. Artifact generation is a separate server-side
     // pipeline (lib/artifacts/*), so the chat model is never told how to emit
     // artifact markup — which is what keeps source files out of visible replies.
+    //
+    // The no-tools paragraph is load-bearing. Asked for a PDF on the plain chat path,
+    // the model invented a tool it does not have and streamed
+    // {"tool": "write_code", "arguments": {...}} into the reply, burning its whole
+    // output budget on escaped JSON and truncating mid-string. Forbidding artifact XML
+    // was not enough: the prohibition has to name tool-call syntax too, or the model
+    // reaches for the nearest plausible mechanism when a request implies one.
     const basePrompt = `You are CodeMind, a senior software engineer assistant.
 
 Answer clearly and directly. When you show code, use fenced Markdown code blocks with a language tag.
+
+You have NO tools. No function calling, no code execution, no file system, no shell, no network access. Never emit tool-call or function-call syntax of any kind — not a JSON object such as {"tool": ...} or {"name": ..., "arguments": ...}, not XML tool tags, not a fenced block written as though it invokes something. Nothing is listening for it, so it produces no result and wastes the reply.
+
+You cannot run code or create a file yourself. When a task would need that, write the code in a fenced Markdown block and say plainly what running it would do.
 
 Downloadable deliverables (project archives, PDFs, standalone files) are produced by a separate CodeMind pipeline. Never emit XML-style artifact or file tags such as <codemind_artifact> or <file path="...">; if a user wants a download, answer normally and CodeMind will handle packaging.`;
 

@@ -80,4 +80,71 @@ describe("detectArtifactIntent", () => {
     expect(detectArtifactIntent(undefined)).toBeNull();
     expect(detectArtifactIntent(42)).toBeNull();
   });
+
+  describe("tolerates the typos that silently downgraded a request to plain chat", () => {
+    /**
+     * The message that actually failed in production. Two slips - a transposed "give"
+     * and a missing space in "in the" - meant no qualifier matched, so a clear PDF
+     * request fell through to normal chat. The model then invented a tool it does not
+     * have and streamed JSON into the reply.
+     */
+    it("classifies the exact message that failed", () => {
+      const result = detectArtifactIntent("giev me inthe pdf the code okay");
+      expect(result?.type).toBe("pdf");
+    });
+
+    it("classifies the correctly spelled version identically", () => {
+      const result = detectArtifactIntent("basic html of calendar give me in the pdf the code");
+      expect(result?.type).toBe("pdf");
+    });
+
+    it("treats the misspelled and correct forms the same way", () => {
+      const typo = detectArtifactIntent("giev me inthe pdf the code okay");
+      const clean = detectArtifactIntent("give me in the pdf the code okay");
+      expect(typo).toEqual(clean);
+    });
+
+    for (const prompt of [
+      "gimme the report as a pdf",
+      "gve me the code as a pdf",
+      "giv me the calendar in a pdf",
+    ]) {
+      it(`handles ${JSON.stringify(prompt)}`, () => {
+        expect(detectArtifactIntent(prompt)?.type).toBe("pdf");
+      });
+    }
+
+    it("applies the same repair to zip requests", () => {
+      expect(detectArtifactIntent("giev me the project as a zip")?.type).toBe("zip");
+    });
+  });
+
+  describe("accepts natural in-the-pdf phrasing", () => {
+    for (const prompt of [
+      "put the code in a pdf",
+      "give me in the pdf the code",
+      "i want the calendar inside a pdf",
+      "write the notes within a pdf",
+    ]) {
+      it(`handles ${JSON.stringify(prompt)}`, () => {
+        expect(detectArtifactIntent(prompt)?.type).toBe("pdf");
+      });
+    }
+  });
+
+  describe("the word pdf alone never triggers generation", () => {
+    for (const prompt of [
+      "pdf",
+      "pdfs",
+      "i opened a pdf yesterday",
+      "what is a pdf",
+      "how do i read a pdf in python",
+      "the pdf was corrupted",
+      "explain how pdf compression works",
+    ]) {
+      it(`returns null for ${JSON.stringify(prompt)}`, () => {
+        expect(detectArtifactIntent(prompt)).toBeNull();
+      });
+    }
+  });
 });

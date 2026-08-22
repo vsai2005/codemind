@@ -14,6 +14,38 @@ import type { ArtifactType } from "@/lib/artifacts/types";
  * project as a zip") always wins.
  */
 
+/**
+ * Repair the handful of typos that silently downgrade a delivery request to plain chat.
+ *
+ * This exists because of a real failure: "giev me inthe pdf the code" produced no
+ * artifact intent, so the request fell through to normal chat. Two separate slips did
+ * it — a transposed "give" and a missing space in "in the" — and neither is unusual in
+ * a chat box. A missed match here is invisible to the user: they asked for a PDF and
+ * simply did not get one.
+ *
+ * Deliberately a short, closed list rather than fuzzy matching. Each entry is a
+ * specific slip with no legitimate alternative reading, so nothing here can turn a
+ * message that was not a delivery request into one. General fuzzy matching would.
+ *
+ * Applied before every pattern below, so ZIP and single-file detection benefit too.
+ */
+function normalizeForIntent(text: string): string {
+  return (
+    text
+      .toLowerCase()
+      // "give" transposed or clipped
+      .replace(/\bgiev\b/g, "give")
+      .replace(/\bgve\b/g, "give")
+      .replace(/\bgiv\b/g, "give")
+      .replace(/\bgimme\b/g, "give me")
+      // prepositions run into the following article
+      .replace(/\binthe\b/g, "in the")
+      .replace(/\bina\b/g, "in a")
+      .replace(/\basa\b/g, "as a")
+      .replace(/\bintoa\b/g, "into a")
+  );
+}
+
 /** Phrases that mean "hand me a deliverable", as opposed to "explain/write it out". */
 const DELIVERY =
   /\b(give me|send me|hand me|provide me|get me|download|downloadable|export|package (?:it|this|them|the)|bundle|zip (?:it|this|them|up)|as an? (?:file|download|zip|pdf|attachment)|i want the files?)\b/;
@@ -28,6 +60,14 @@ const PROJECT_NOUN =
 const ZIP_NOUN = /\bzips?\b|\.zip\b/;
 const PDF_NOUN = /\bpdfs?\b|\.pdf\b/;
 const AS_PDF = /\b(?:as|into|to)\s+an?\s+pdf\b/;
+
+/**
+ * "give me in the pdf", "put the code in a pdf", "inside the pdf".
+ *
+ * Natural phrasing that AS_PDF does not cover: people say "in the PDF" at least as
+ * often as "as a PDF", and the request is equally explicit.
+ */
+const IN_PDF = /\b(?:in|inside|within)\s+(?:an?|the)\s+pdf\b/;
 const PDF_PRODUCE_VERB = /\b(export|generate|create|make|write|turn|produce|render|convert)\b/;
 
 const SCRIPT_NOUN = /\b(scripts?|files?|components?|modules?)\b/;
@@ -50,7 +90,7 @@ export interface ArtifactIntent {
 export function detectArtifactIntent(rawText: unknown): ArtifactIntent | null {
   if (typeof rawText !== "string") return null;
 
-  const text = rawText.toLowerCase();
+  const text = normalizeForIntent(rawText);
   if (text.trim().length === 0) return null;
 
   const wantsDelivery = DELIVERY.test(text);
@@ -72,7 +112,12 @@ export function detectArtifactIntent(rawText: unknown): ArtifactIntent | null {
   }
 
   // --- PDF -----------------------------------------------------------------
-  if (PDF_NOUN.test(text) && (wantsDelivery || AS_PDF.test(text) || PDF_PRODUCE_VERB.test(text))) {
+  // The noun alone is never enough — "what does pdf stand for" is not a request for
+  // one. It must be paired with evidence the user wants to RECEIVE a PDF.
+  if (
+    PDF_NOUN.test(text) &&
+    (wantsDelivery || AS_PDF.test(text) || IN_PDF.test(text) || PDF_PRODUCE_VERB.test(text))
+  ) {
     return { type: "pdf", reason: "explicit pdf request" };
   }
 
