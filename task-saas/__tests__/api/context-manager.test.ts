@@ -320,6 +320,23 @@ describe("ContextManager.buildContext", () => {
       expect(promptFor()).toMatch(/fenced Markdown block/i);
     });
 
+    /**
+     * The opposite failure, caused by the first fix. Told flatly that it "cannot
+     * create a file", the model started answering "I can't create a PDF" - false
+     * about the product, since the artifact pipeline builds them. The prompt has to
+     * separate what the MODEL cannot do from what CODEMIND can.
+     */
+    it("does not claim the product cannot produce downloads", () => {
+      const prompt = promptFor();
+      expect(prompt).toMatch(/CodeMind itself CAN produce downloads/i);
+      expect(prompt).toMatch(/never tell the user a PDF, ZIP or file cannot be created/i);
+    });
+
+    it("contains no blanket statement that a file cannot be created", () => {
+      // The exact phrasing that produced the refusal.
+      expect(promptFor()).not.toMatch(/you cannot .{0,20}create a file/i);
+    });
+
     it("fits inside the reserve the budget subtracts for it", () => {
       // Under-reserving surfaces as an occasional context overflow rather than an
       // obvious error, so this guards the number rather than trusting it.

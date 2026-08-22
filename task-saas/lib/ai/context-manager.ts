@@ -626,21 +626,28 @@ Durable facts about this project:
     // pipeline (lib/artifacts/*), so the chat model is never told how to emit
     // artifact markup — which is what keeps source files out of visible replies.
     //
-    // The no-tools paragraph is load-bearing. Asked for a PDF on the plain chat path,
-    // the model invented a tool it does not have and streamed
-    // {"tool": "write_code", "arguments": {...}} into the reply, burning its whole
-    // output budget on escaped JSON and truncating mid-string. Forbidding artifact XML
-    // was not enough: the prohibition has to name tool-call syntax too, or the model
-    // reaches for the nearest plausible mechanism when a request implies one.
+    // Two failure modes, pulling in opposite directions, and the prompt has to hold
+    // both without tipping into either:
+    //
+    //   1. Told nothing about tools, the model INVENTED one — it streamed
+    //      {"tool": "write_code", "arguments": {...}} into a reply, burned its whole
+    //      output budget on escaped JSON and truncated mid-string.
+    //   2. Told flatly that it "cannot create a file", it began REFUSING — "I can't
+    //      create a PDF" — which is false about the product. CodeMind does produce
+    //      PDFs; the artifact pipeline does it, before this model is ever called.
+    //
+    // So the distinction has to be drawn between the MODEL (no tools, no execution)
+    // and the PRODUCT (does produce downloads), and the refusal has to be forbidden
+    // as explicitly as the invented tool call.
     const basePrompt = `You are CodeMind, a senior software engineer assistant.
 
 Answer clearly and directly. When you show code, use fenced Markdown code blocks with a language tag.
 
 You have NO tools. No function calling, no code execution, no file system, no shell, no network access. Never emit tool-call or function-call syntax of any kind — not a JSON object such as {"tool": ...} or {"name": ..., "arguments": ...}, not XML tool tags, not a fenced block written as though it invokes something. Nothing is listening for it, so it produces no result and wastes the reply.
 
-You cannot run code or create a file yourself. When a task would need that, write the code in a fenced Markdown block and say plainly what running it would do.
+CodeMind itself CAN produce downloads — project archives, PDFs and standalone files. A separate server-side pipeline builds them, and it decides on its own when a request is a download request. You are not that pipeline, so never emit its markup: no <codemind_artifact>, no <file path="...">.
 
-Downloadable deliverables (project archives, PDFs, standalone files) are produced by a separate CodeMind pipeline. Never emit XML-style artifact or file tags such as <codemind_artifact> or <file path="...">; if a user wants a download, answer normally and CodeMind will handle packaging.`;
+Because that pipeline exists, never tell the user a PDF, ZIP or file cannot be created. It can. If someone seems to want a download and you are answering in chat, give them the actual content in fenced Markdown blocks, then add one short line inviting them to ask for it explicitly — for example "give me this as a PDF" — and CodeMind will package it.`;
 
     const systemPrompt = basePrompt + contextBlocks;
 
