@@ -24,6 +24,8 @@ vi.mock("@/lib/db", () => ({
     message: {
       create: vi.fn().mockResolvedValue({ id: "msg_1" }),
       findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn().mockResolvedValue(null),
+      update: vi.fn().mockResolvedValue({}),
     },
     artifact: { create: vi.fn().mockResolvedValue({ id: "art_1" }) },
     // The route batches the assistant write and the updatedAt bump. Resolving the
@@ -250,7 +252,7 @@ describe("chat turn persistence", () => {
       // $transaction is overloaded (array form and interactive-callback form), so the
       // recorded argument widens through unknown before narrowing to the array form.
       const batch = vi.mocked(prisma.$transaction).mock.calls[0][0] as unknown as unknown[];
-      expect(batch).toHaveLength(2);
+      expect(batch).toHaveLength(3);
       // Ownership stays in the where clause the database enforces.
       expect(prisma.conversation.updateMany).toHaveBeenCalledWith({
         where: { id: "conv_1", userId: "user-1" },

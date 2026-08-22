@@ -102,6 +102,22 @@ export const chatRequestSchema = z
       .max(64)
       .regex(/^[a-z0-9-]+$/, "invalid model id")
       .nullish(),
+    /**
+     * Optional idempotency key identifying this turn, so a retry is a resume rather
+     * than a second write.
+     *
+     * Optional because the browser client does not need it: the server derives an
+     * equivalent key from the request when this is absent (see route.ts). It exists
+     * for non-browser callers that want to name the turn explicitly. The value is
+     * never stored raw — it is hashed together with the user id — so the character
+     * restriction here is shape validation, not a security boundary.
+     */
+    idempotencyKey: z
+      .string()
+      .min(8)
+      .max(128)
+      .regex(/^[A-Za-z0-9_-]+$/, "invalid idempotency key")
+      .nullish(),
   })
   .refine((data) => data.messages[data.messages.length - 1]?.role === "user", {
     message: "the last message must be a user message",

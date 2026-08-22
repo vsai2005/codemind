@@ -193,6 +193,24 @@ model Message {
   promptTokens     Int?
   completionTokens Int?
 
+  /// Idempotency key for the turn this user message opened. User messages only.
+  ///
+  /// HELD ONLY WHILE THE TURN IS UNRESOLVED. It is set when the message is written,
+  /// before generation starts, and cleared in the same transaction that persists the
+  /// assistant reply. So the unique index guards exactly the window where a retry
+  /// would duplicate, and stops guarding the moment the turn succeeds.
+  ///
+  /// That is deliberate. Keeping the key forever would block a user legitimately
+  /// sending the same text twice ("continue", "yes") in one conversation, which is
+  /// normal. Releasing it on completion means a legitimate repeat always finds the
+  /// key free, because a completed turn released it.
+  ///
+  /// The value is a sha256 over the user id plus the request identity, so it is
+  /// opaque, fixed-width, and cannot collide across users even if two people supply
+  /// the same client-side key. Nullable and unique: Postgres permits many NULLs, so
+  /// existing rows and every assistant message stay valid.
+  idempotencyKey String? @unique
+
   artifacts Artifact[]
 
   @@index([conversationId])

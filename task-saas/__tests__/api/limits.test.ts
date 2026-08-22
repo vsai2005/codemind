@@ -14,6 +14,8 @@ vi.mock("@/lib/db", () => ({
       create: vi.fn().mockResolvedValue({ id: "msg_1" }),
       // Historical retrieval candidates, loaded server-side.
       findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn().mockResolvedValue(null),
+      update: vi.fn().mockResolvedValue({}),
     },
     artifact: { create: vi.fn().mockResolvedValue({ id: "art_1" }) },
   },

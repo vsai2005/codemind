@@ -33,6 +33,7 @@ import { logger } from "@/lib/logger";
 import { Prisma } from "@prisma/client";
 import type { ArtifactMetadata, NormalizedArtifact } from "@/lib/artifacts/types";
 import { enforceBodyLimit } from "@/lib/http/body-limit";
+import { createHash } from "node:crypto";
 
 /**
  * How far back historical retrieval scans. Older turns than this are represented by
@@ -101,6 +102,56 @@ function toTokenCount(value: number | undefined | null): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? Math.round(value)
     : null;
+}
+
+/**
+ * How long a held idempotency key is assumed to belong to a request that is still
+ * running. Matches the gateway's own stalled-lease backstop, which is the longest a
+ * generation can legitimately stay open.
+ *
+ * CONSEQUENCE, and it is a real one: this is a heuristic, not a fact. The key is held
+ * by a row in the database and nothing revokes it if the process dies mid-stream — a
+ * deploy, a crash, an OOM. When that happens the key stays held with nothing behind
+ * it, and a user retrying that message gets 409 "already being processed" until this
+ * window elapses. They are told to wait and are not blocked permanently, but for up
+ * to two minutes the API asserts a request is live when it is not.
+ *
+ * Shortening it trades that for the opposite error: deciding a slow-but-live
+ * generation is dead and running a second one alongside it. Two minutes is where the
+ * gateway itself abandons a stream, so a key outliving this really does imply nothing
+ * is still running.
+ */
+const TURN_KEY_ASSUMED_LIVE_MS = 2 * 60_000;
+
+/**
+ * Stable identifier for "this turn", used to make a retry a resume instead of a
+ * second write.
+ *
+ * Always hashed together with the user id, which is what scopes it: two users
+ * supplying the same client key, or sending identical text, produce different digests
+ * and cannot see or overwrite each other's turns. Hashing also keeps the stored value
+ * opaque and fixed-width, so no user-controlled string is ever matched directly.
+ *
+ * With no client key, one is derived from the request itself — the conversation it
+ * targets plus the exact message text. The browser needs no change for that to work,
+ * and it is what actually closes the duplicate paths here, because every duplicate
+ * comes from a user resending rather than from one HTTP request arriving twice.
+ */
+function turnKeyFor(
+  userId: string,
+  clientKey: string | null | undefined,
+  conversationId: string | null | undefined,
+  content: string
+): string {
+  const identity = clientKey
+    ? `client ${clientKey}`
+    : `derived ${conversationId ?? "new"} ${content}`;
+  return createHash("sha256").update(`${userId} ${identity}`).digest("hex");
+}
+
+/** True when a write lost a race against the unique index on Message.idempotencyKey. */
+function isUniqueViolation(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
 }
 
 /** True when every provider key was busy or cooling down. */
@@ -285,13 +336,75 @@ export async function POST(req: Request): Promise<Response> {
     }
     const { messages, conversationId } = parsed.data;
 
+    // --- Idempotency -------------------------------------------------------------
+    // Resolved BEFORE the conversation is created or looked up, because one of the
+    // duplicates this closes is a second CONVERSATION: a retry from the dashboard
+    // carries no conversationId, so without this it would open a new one and file the
+    // repeated message there.
+    const turnKey = turnKeyFor(
+      userId,
+      parsed.data.idempotencyKey,
+      conversationId,
+      messages[messages.length - 1].content
+    );
+
+    // A held key means an earlier attempt at this same turn wrote its user message and
+    // never finished — the key is cleared when the assistant reply is persisted, so a
+    // completed turn leaves nothing here and a legitimate repeat is never blocked.
+    const heldTurn = await prisma.message.findUnique({
+      where: { idempotencyKey: turnKey },
+      select: { id: true, conversationId: true, createdAt: true },
+    });
+
+    // Reused rather than re-inserted when an abandoned attempt is resumed.
+    let existingUserMessageId: string | null = null;
+    // Forces the resumed turn back onto its original conversation.
+    let resumedConversationId: string | null = null;
+
+    if (heldTurn) {
+      if (Date.now() - heldTurn.createdAt.getTime() < TURN_KEY_ASSUMED_LIVE_MS) {
+        // Still inside the window where a request could plausibly be streaming. We
+        // cannot join someone else's stream without process-local coordination, so
+        // say so plainly rather than silently duplicating the turn. See
+        // TURN_KEY_ASSUMED_LIVE_MS for when this answer is wrong.
+        logger.warn("Rejected duplicate chat request; original may still be running", {
+          conversationId: heldTurn.conversationId,
+        });
+        return NextResponse.json(
+          {
+            error:
+              "That message is already being processed. Wait a moment for the reply, or try again shortly.",
+          },
+          {
+            status: 409,
+            headers: {
+              "Retry-After": "5",
+              "x-conversation-id": heldTurn.conversationId,
+            },
+          }
+        );
+      }
+
+      // Old enough that nothing can still be generating it. Pick the turn back up
+      // where it stopped: same conversation, same user message, new attempt at a reply.
+      existingUserMessageId = heldTurn.id;
+      resumedConversationId = heldTurn.conversationId;
+      logger.info("Resuming an abandoned turn instead of duplicating it", {
+        conversationId: heldTurn.conversationId,
+      });
+    }
+
     // Ownership is always derived from the session, never from the request body.
     let activeConversationId: string;
     let existingSummary: string | null = null;
 
     let activeProjectId: string | null = null;
 
-    if (!conversationId) {
+    // A resumed turn keeps its original conversation even when the retry forgot to
+    // name one, which is exactly the dashboard case.
+    const targetConversationId = resumedConversationId ?? conversationId;
+
+    if (!targetConversationId) {
       // A projectId from the client is only honoured if the caller owns that project.
       let projectId: string | null = null;
       if (parsed.data.projectId) {
@@ -312,7 +425,7 @@ export async function POST(req: Request): Promise<Response> {
       activeProjectId = projectId;
     } else {
       const existing = await prisma.conversation.findFirst({
-        where: { id: conversationId, userId },
+        where: { id: targetConversationId, userId },
       });
       if (!existing) {
         return NextResponse.json(
@@ -541,6 +654,16 @@ export async function POST(req: Request): Promise<Response> {
                 where: { id: activeConversationId, userId },
                 data: { updatedAt: new Date() },
               }),
+              // Release the turn's idempotency key, in the SAME transaction that
+              // records the reply. The key exists to guard an unresolved turn; once
+              // the reply is durable the turn is resolved and the key must stop
+              // blocking, or the user could never send that text again. Committing it
+              // with the reply means the key is never released without a reply behind
+              // it, and never held after one.
+              prisma.message.update({
+                where: { id: userMessageId },
+                data: { idempotencyKey: null },
+              }),
             ]);
 
             logger.debug("Turn persisted", {
@@ -602,19 +725,64 @@ export async function POST(req: Request): Promise<Response> {
     // would duplicate the user message on every artifact request. Everything between
     // validation and this line either persists the turn itself or rejects before any
     // generation was attempted.
-    await prisma.message.create({
-      data: { conversationId: activeConversationId, role: "user", content: originalRawContent },
-    });
+    //
+    // It carries the turn's idempotency key, and the unique index on that column is
+    // what actually enforces "once". The lookup above is the fast path; this is the
+    // race backstop for two identical requests that both got past it.
+    let userMessageId: string;
+    if (existingUserMessageId) {
+      // Resuming an abandoned attempt: the message is already there. Writing it again
+      // is precisely the duplicate this exists to prevent.
+      userMessageId = existingUserMessageId;
+    } else {
+      try {
+        const created = await prisma.message.create({
+          data: {
+            conversationId: activeConversationId,
+            role: "user",
+            content: originalRawContent,
+            idempotencyKey: turnKey,
+          },
+          select: { id: true },
+        });
+        userMessageId = created.id;
+      } catch (error) {
+        if (!isUniqueViolation(error)) throw error;
+        // Another request claimed this turn between our lookup and this insert, so it
+        // is live by definition. Same answer as the in-flight branch above.
+        logger.warn("Duplicate chat request lost the race for its turn key", {
+          conversationId: activeConversationId,
+        });
+        return NextResponse.json(
+          {
+            error:
+              "That message is already being processed. Wait a moment for the reply, or try again shortly.",
+          },
+          {
+            status: 409,
+            headers: { "Retry-After": "5", "x-conversation-id": activeConversationId },
+          }
+        );
+      }
+    }
 
     let result: Awaited<ReturnType<typeof startStream>>;
     try {
       result = await startStream(context);
     } catch (error) {
+      // Every failure below carries x-conversation-id. The conversation and the user
+      // message both exist by this point, and the client has no other way to learn
+      // the id from an error: without it a retry from the dashboard names no
+      // conversation and opens a second one. useChat reads the header, because
+      // onResponse runs before it checks response.ok.
       if (isNoCapacityError(error)) {
         logger.warn("All provider keys busy", { conversationId: activeConversationId });
         return NextResponse.json(
           { error: "CodeMind is at capacity right now. Please try again in a moment." },
-          { status: 503, headers: { "Retry-After": "5" } }
+          {
+            status: 503,
+            headers: { "Retry-After": "5", "x-conversation-id": activeConversationId },
+          }
         );
       }
 
@@ -627,7 +795,7 @@ export async function POST(req: Request): Promise<Response> {
           {
             error: `${resolved.descriptor.displayName} did not respond. The model may be unavailable right now — try another model from the selector.`,
           },
-          { status: 504 }
+          { status: 504, headers: { "x-conversation-id": activeConversationId } }
         );
       }
       if (!isProviderContextError(error)) throw error;
@@ -649,7 +817,7 @@ export async function POST(req: Request): Promise<Response> {
             error:
               "This conversation is too large for the model's context window, even after reducing the history included. Please start a new conversation, or shorten your message.",
           },
-          { status: 400 }
+          { status: 400, headers: { "x-conversation-id": activeConversationId } }
         );
       }
     }

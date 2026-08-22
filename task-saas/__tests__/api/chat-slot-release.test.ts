@@ -22,6 +22,8 @@ vi.mock("@/lib/db", () => ({
     message: {
       create: vi.fn().mockResolvedValue({ id: "msg_1" }),
       findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn().mockResolvedValue(null),
+      update: vi.fn().mockResolvedValue({}),
     },
     artifact: { create: vi.fn().mockResolvedValue({ id: "art_1" }) },
     $transaction: vi.fn((ops: unknown) => (Array.isArray(ops) ? Promise.all(ops) : Promise.resolve(ops))),
