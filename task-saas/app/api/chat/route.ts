@@ -33,6 +33,11 @@ import { logger } from "@/lib/logger";
 import { Prisma } from "@prisma/client";
 import type { ArtifactMetadata, NormalizedArtifact } from "@/lib/artifacts/types";
 import { enforceBodyLimit } from "@/lib/http/body-limit";
+import {
+  buildSummaryPrompt,
+  validateSummary,
+  SUMMARY_MAX_OUTPUT_TOKENS,
+} from "@/lib/ai/summarization";
 import { createHash } from "node:crypto";
 
 /**
@@ -245,6 +250,8 @@ async function summarizeDropped(
   conversationId: string,
   userId: string,
   existingSummary: string | null,
+  /** Version read alongside `existingSummary`. The write is conditional on it. */
+  existingSummaryVersion: number,
   droppedMessagesContent: string
 ): Promise<void> {
   if (!droppedMessagesContent) return;
@@ -256,25 +263,54 @@ async function summarizeDropped(
       // character depend on who happened to be answering when it was written.
       model: resolveModel(process.env.CODEMIND_SUMMARY_MODEL || getDefaultModelId()).model,
       maxRetries: SDK_RETRIES,
-      prompt: `You are a conversation memory manager.
-Summarize the following old conversation messages. Extract key decisions, architecture rules, project goals, and constraints. Do NOT include large code snippets.
-Merge this effectively with the existing summary if one exists.
-
-Existing Summary:
-${existingSummary || "None"}
-
-Old Messages to add to memory:
-${droppedMessagesContent}
-`,
-      maxTokens: 1024,
+      prompt: buildSummaryPrompt({ existingSummary, droppedMessagesContent }),
+      maxTokens: SUMMARY_MAX_OUTPUT_TOKENS,
     });
 
-    // updateMany so ownership is part of the filter the database enforces, matching
-    // every other write in the app. The id is server-derived and already checked, so
-    // this is defence in depth rather than a fix for a reachable hole.
-    await prisma.conversation.updateMany({
-      where: { id: conversationId, userId },
-      data: { summary: summaryResult.text.trim() },
+    // Checked BEFORE it is written, because this string is replayed into every later
+    // system prompt for this conversation. A rejected summary leaves the previous one
+    // standing, which is strictly better than persisting markup — or nothing.
+    const validation = validateSummary(summaryResult.text);
+    if (!validation.ok) {
+      logger.warn("Rejected a generated conversation summary", {
+        conversationId,
+        reason: validation.reason,
+      });
+      return;
+    }
+
+    // Conditional on the version that was read. Two turns in one conversation can
+    // summarize at once — summarization is detached from the request — and each merges
+    // into the summary it read at the start. Without the version in the filter the
+    // slower write silently discards the other's memory, and the result still looks
+    // like a perfectly good summary, so nothing would ever surface the loss.
+    //
+    // updateMany rather than update: it matches zero rows instead of throwing when the
+    // version has moved on, and keeps ownership in the filter the database enforces.
+    const written = await prisma.conversation.updateMany({
+      where: { id: conversationId, userId, summaryVersion: existingSummaryVersion },
+      data: {
+        summary: validation.summary,
+        summaryVersion: existingSummaryVersion + 1,
+      },
+    });
+
+    if (written.count === 0) {
+      // Lost the race. Non-fatal by design: the winner's summary already covers its
+      // own dropped messages, and this turn's messages are folded in by the next
+      // summarization, which reads the newer version. Nothing is retried here — a
+      // retry loop against a conversation under sustained load would not converge.
+      logger.info("Discarded a summary that lost the version race", {
+        conversationId,
+        expectedVersion: existingSummaryVersion,
+      });
+      return;
+    }
+
+    logger.debug("Conversation summary updated", {
+      conversationId,
+      version: existingSummaryVersion + 1,
+      chars: validation.summary.length,
     });
   } catch (error) {
     logger.warn("Background summarization failed", {
@@ -397,6 +433,9 @@ export async function POST(req: Request): Promise<Response> {
     // Ownership is always derived from the session, never from the request body.
     let activeConversationId: string;
     let existingSummary: string | null = null;
+    // Read with the summary so the eventual write can be conditional on it. A new
+    // conversation starts at the column default.
+    let existingSummaryVersion = 0;
 
     let activeProjectId: string | null = null;
 
@@ -435,6 +474,7 @@ export async function POST(req: Request): Promise<Response> {
       }
       activeConversationId = existing.id;
       existingSummary = existing.summary;
+      existingSummaryVersion = existing.summaryVersion;
       activeProjectId = existing.projectId;
     }
 
@@ -561,6 +601,7 @@ export async function POST(req: Request): Promise<Response> {
         conversationId: activeConversationId,
         originalRawContent,
         existingSummary,
+        existingSummaryVersion,
         droppedMessagesContent: context.droppedMessagesContent,
         model: resolved.model,
         provider: resolved.descriptor.provider,
@@ -692,6 +733,7 @@ export async function POST(req: Request): Promise<Response> {
               activeConversationId,
               userId,
               existingSummary,
+              existingSummaryVersion,
               ctx.droppedMessagesContent
             ).catch((error) => {
               // summarizeDropped already swallows its own failures. This only stops a
@@ -900,6 +942,8 @@ interface ArtifactRequestParams {
   conversationId: string;
   originalRawContent: string;
   existingSummary: string | null;
+  /** Version read with the summary; the summary write is conditional on it. */
+  existingSummaryVersion: number;
   droppedMessagesContent: string;
   /** Model the user selected, so artifacts come from their chosen model. */
   model: LanguageModelV1;
@@ -931,6 +975,7 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
     conversationId,
     originalRawContent,
     existingSummary,
+    existingSummaryVersion,
     droppedMessagesContent,
     model,
     provider,
@@ -974,7 +1019,7 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
           plan,
         });
         writer.text(visible);
-        await summarizeDropped(conversationId, userId, existingSummary, droppedMessagesContent);
+        await summarizeDropped(conversationId, userId, existingSummary, existingSummaryVersion, droppedMessagesContent);
         return;
       }
 
@@ -1007,7 +1052,7 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
           plan,
         });
         writer.text(visible);
-        await summarizeDropped(conversationId, userId, existingSummary, droppedMessagesContent);
+        await summarizeDropped(conversationId, userId, existingSummary, existingSummaryVersion, droppedMessagesContent);
         return;
       }
 
@@ -1034,7 +1079,7 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
         writer.annotate({ codemindArtifacts: [metadata] } as never);
       }
 
-      await summarizeDropped(conversationId, userId, existingSummary, droppedMessagesContent);
+      await summarizeDropped(conversationId, userId, existingSummary, existingSummaryVersion, droppedMessagesContent);
     },
     { headers: { "x-conversation-id": conversationId } }
   );
