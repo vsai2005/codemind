@@ -551,7 +551,33 @@ export async function POST(req: Request): Promise<Response> {
               completionTokens,
             });
 
-            await summarizeDropped(activeConversationId, userId, existingSummary, ctx.droppedMessagesContent);
+            // Started, deliberately not awaited.
+            //
+            // This is a second model call (up to 1024 tokens) that the user is not
+            // waiting for. Awaiting it here held the stream open: the AI SDK does not
+            // close its controller until onFinish resolves, and releaseOnStreamEnd
+            // frees the user's generation slot only once the body drains. So a slow
+            // summary kept a slot locked against concurrentGenerationLimit() long
+            // after the reply was already on screen.
+            //
+            // Detaching is safe because CodeMind runs as a long-lived Node process
+            // (Dockerfile CMD ["node","server.js"], render.yaml runtime: docker), so
+            // work outliving a response still runs to completion. On a runtime that
+            // freezes once the response is sent — any serverless platform — this
+            // would silently stop summarizing and would need waitUntil() instead.
+            void summarizeDropped(
+              activeConversationId,
+              userId,
+              existingSummary,
+              ctx.droppedMessagesContent
+            ).catch((error) => {
+              // summarizeDropped already swallows its own failures. This only stops a
+              // future edit there turning a detached rejection into an unhandled one.
+              logger.warn("Detached summarization rejected", {
+                conversationId: activeConversationId,
+                error: scrubForLog(error instanceof Error ? error.message : "unknown"),
+              });
+            });
           } catch (error) {
             // Logged and swallowed. Rethrowing would error the stream the user is
             // already reading, turning a bookkeeping failure into a visible one.
