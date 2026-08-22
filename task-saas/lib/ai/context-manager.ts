@@ -1,6 +1,7 @@
 import { Message } from "ai";
 import { ATTACHMENT_TAG_RE } from "@/lib/attachments";
 import { getContextTokenLimit, getOutputTokenLimit } from "@/lib/env";
+import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 
 /**
  * Context Management V3
@@ -16,12 +17,14 @@ import { getContextTokenLimit, getOutputTokenLimit } from "@/lib/env";
  */
 
 /**
- * Flat reserve for the base persona prompt (see `basePrompt` below).
+ * Flat reserve for the static persona layers (identity + capabilities + guardrails),
+ * built by buildSystemPrompt in lib/ai/system-prompt.ts.
  *
- * Measured, not guessed: the persona is ~1,000 characters / ~287 estimated tokens
- * after the no-tools paragraph was added. 400 leaves room to reword it without
- * silently under-reserving, which would show up as an occasional context overflow
- * rather than an obvious error. Re-measure if the persona grows again.
+ * Measured, not guessed: those three layers assemble to ~1,500 characters / ~377
+ * estimated tokens. 400 leaves room to reword without silently under-reserving,
+ * which would show up as an occasional context overflow rather than an obvious
+ * error. It is mirrored there as STATIC_PROMPT_TOKEN_BUDGET, where per-layer
+ * ceilings pin down which layer grew; keep the two numbers in step.
  */
 const SYSTEM_PROMPT_RESERVE = 400;
 
@@ -626,39 +629,12 @@ Durable facts about this project:
     // pipeline (lib/artifacts/*), so the chat model is never told how to emit
     // artifact markup — which is what keeps source files out of visible replies.
     //
-    // Three failure modes, each produced by fixing the previous one. The prompt has to
-    // hold all three at once, so any edit here should be checked against all of them
-    // (see the "system prompt guardrails" tests):
-    //
-    //   1. INVENTED TOOL — told nothing about tools, the model streamed
-    //      {"tool": "write_code", "arguments": {...}} into a reply, burned its whole
-    //      output budget on escaped JSON and truncated mid-string.
-    //   2. REFUSAL — told flatly it "cannot create a file", it answered "I can't create
-    //      a PDF". True of the model, false of the product: the artifact pipeline does
-    //      produce PDFs.
-    //   3. FALSE PROMISE — told the pipeline exists, it narrated as though the pipeline
-    //      were running: "the server-side pipeline will now package it, you'll receive
-    //      the download shortly". Nothing was running and no file ever arrived.
-    //
-    // The resolution for (3) is the key fact the model cannot otherwise know: intent
-    // detection runs in the route BEFORE this model is called. If it is generating a
-    // reply at all, the pipeline already decided this was not a download request. It
-    // never runs alongside a chat reply.
-    const basePrompt = `You are CodeMind, a senior software engineer assistant.
-
-Answer clearly and directly. When you show code, use fenced Markdown code blocks with a language tag.
-
-You have NO tools. No function calling, no code execution, no file system, no shell, no network access. Never emit tool-call or function-call syntax of any kind — not a JSON object such as {"tool": ...} or {"name": ..., "arguments": ...}, not XML tool tags, not a fenced block written as though it invokes something. Nothing is listening for it, so it produces no result and wastes the reply.
-
-CodeMind can produce downloads — project archives, PDFs and standalone files — but a separate pipeline builds them and decides before you are called. You are not that pipeline, so never emit its markup: no <codemind_artifact>, no <file path="...">. Two rules follow, and both matter:
-
-Never say a download cannot be created. It can, and saying otherwise is simply wrong.
-
-Never say a download is being created, is on its way, is being packaged, or will arrive shortly. If you are writing this reply, that pipeline already decided this was not a download request and is not running. No file is coming. Promising one that never appears is worse than not mentioning it.
-
-So: answer the question and put the content in fenced Markdown blocks. If the user seems to want a file, close with one short line inviting them to ask again explicitly — for example "give me this as a PDF" — because that next message is what routes to the pipeline.`;
-
-    const systemPrompt = basePrompt + contextBlocks;
+    // The persona itself lives in lib/ai/system-prompt.ts, composed from four layers
+    // (identity, capabilities, task context, guardrails) with the guardrails last so
+    // they outrank anything the assembled context happens to say. That layer encodes
+    // three production failure modes and is documented at length there; this function
+    // only supplies the task-context layer it budgeted above.
+    const systemPrompt = buildSystemPrompt({ contextBlocks });
 
     const used = totalBudget - budget;
     const ratio = totalBudget > 0 ? used / totalBudget : 1;
