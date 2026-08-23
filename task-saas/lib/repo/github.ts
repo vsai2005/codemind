@@ -108,6 +108,12 @@ export function parseRepoUrl(input: string): RepoRef | null {
     return null;
   }
 
+  // Only the web schemes. Not currently exploitable — the scheme is discarded when the
+  // API URL is built — but this function's answer means "this is a public GitHub
+  // repository URL", and ftp://github.com/foo/bar is not one. Accepting it would mean
+  // silently reinterpreting a URL the user did not write.
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+
   // Exact host match. "github.com.evil.test" must not pass, and neither must a
   // self-hosted Enterprise host, which is out of scope and has a different API base.
   const host = url.hostname.toLowerCase();
