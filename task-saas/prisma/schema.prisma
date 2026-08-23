@@ -393,6 +393,13 @@ model RepositoryFile {
   /// table when exact symbol lookup ("go to definition") needs one.
   symbols      String[]   @default([])
 
+  /// Names the file declares WITHOUT exporting — class members and top-level
+  /// declarations. Weighted below `symbols` when scoring, because a public contract
+  /// states a file's purpose more strongly than a private helper does, but indexed
+  /// because a file can hold its entire meaning in names it never exports. Measured
+  /// case: ky's Ky.ts exports one symbol and declares the whole retry loop.
+  internalSymbols String[] @default([])
+
   @@unique([repositoryId, path])
   @@index([repositoryId, language])
 }

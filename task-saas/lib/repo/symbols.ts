@@ -106,3 +106,70 @@ export function extractSymbols(source: string): string[] {
 
   return found;
 }
+
+/**
+ * Names a file DECLARES without exporting: class members and top-level declarations.
+ *
+ * WHY THIS EXISTS
+ * Measured on sindresorhus/ky. `source/core/Ky.ts` is 37,849 bytes, holds the entire
+ * retry loop, and exports exactly ONE symbol — the class `Ky`. Asked "what happens to
+ * the request body when ky retries a request?", it scored nothing at all, while files
+ * that merely mention bodies were fetched instead. The file declares
+ * calculateRetryDelay, retryRequest, cloneRetryOptions, cancelBody and raceBodyRead;
+ * the evidence was there, and only the public contract was being indexed.
+ *
+ * DELIBERATELY NARROWER THAN IT COULD BE
+ * A first probe swept up every `const` in the file and returned 102 names, most of them
+ * local bindings inside function bodies — `result`, `text`, `url`, `chunks`,
+ * `remaining`. Those name a step in an algorithm, not the purpose of a file, and
+ * indexing them buries the real signal in generic vocabulary. Only two shapes are
+ * taken: members declared at class-body indentation, and declarations at the top level
+ * of the module.
+ *
+ * Exported names are extracted separately and weighted higher; anything appearing in
+ * both lists is dropped from this one, so a public contract is never counted twice.
+ */
+export function extractInternalSymbols(source: string, exported: readonly string[]): string[] {
+  const found: string[] = [];
+  const seen = new Set<string>(exported);
+
+  /** Class members: `  methodName(` / `  private async methodName(` / `  #private(`. */
+  const CLASS_MEMBER =
+    /^[ \t]{1,8}(?:public\s+|private\s+|protected\s+|static\s+|readonly\s+|async\s+|\*\s*|get\s+|set\s+)*(#?[A-Za-z_$][\w$]*)\s*(?:<[^>\n]*>)?\s*\(/gm;
+
+  /** Top level only — column zero, so locals inside a function body cannot match. */
+  const TOP_LEVEL =
+    /^(?:const|let|var|function|async function|class|type|interface|enum)\s+([A-Za-z_$][\w$]*)/gm;
+
+  const add = (raw: string | undefined): void => {
+    if (!raw) return;
+    const name = raw.replace(/^#/, "").trim();
+    // Control-flow keywords read as calls at class indentation; `constructor` names
+    // nothing about purpose.
+    if (name.length < 3 || RESERVED.has(name) || seen.has(name)) return;
+    seen.add(name);
+    found.push(name);
+  };
+
+  try {
+    for (const pattern of [CLASS_MEMBER, TOP_LEVEL]) {
+      pattern.lastIndex = 0;
+      let match: RegExpExecArray | null;
+      while ((match = pattern.exec(source)) !== null) {
+        add(match[1]);
+        if (found.length >= MAX_SYMBOLS_PER_FILE) return found;
+      }
+    }
+  } catch {
+    return found;
+  }
+
+  return found;
+}
+
+/** Keywords that parse as declarations or calls but name nothing. */
+const RESERVED = new Set([
+  "if", "for", "while", "switch", "catch", "return", "constructor", "super",
+  "typeof", "instanceof", "await", "yield", "new", "delete", "void", "with",
+  "function", "class", "const", "let", "var", "import", "export", "default",
+]);

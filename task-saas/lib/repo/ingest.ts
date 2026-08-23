@@ -9,7 +9,7 @@ import {
   type RepoRef,
 } from "@/lib/repo/github";
 import { readTarball } from "@/lib/repo/archive";
-import { extractSymbols, supportsSymbols } from "@/lib/repo/symbols";
+import { extractInternalSymbols, extractSymbols, supportsSymbols } from "@/lib/repo/symbols";
 import { detectStructure, languageForPath, primaryLanguage } from "@/lib/repo/structure";
 
 /**
@@ -149,6 +149,7 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
      * file exports nothing".
      */
     const symbolsByPath = new Map<string, string[]>();
+    const internalByPath = new Map<string, string[]>();
     let symbolsExtracted = false;
     const archiveStarted = Date.now();
 
@@ -159,6 +160,10 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
           if (!supportsSymbols(languageForPath(entry.path))) return;
           const symbols = extractSymbols(entry.content);
           if (symbols.length > 0) symbolsByPath.set(entry.path, symbols);
+          // Internal declarations are what make a file whose meaning lives in private
+          // members findable at all — see extractInternalSymbols.
+          const internal = extractInternalSymbols(entry.content, symbols);
+          if (internal.length > 0) internalByPath.set(entry.path, internal);
         });
         symbolsExtracted = true;
       } catch (error) {
@@ -179,6 +184,7 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
       size: entry.size,
       language: languageForPath(entry.path),
       symbols: symbolsByPath.get(entry.path) ?? [],
+      internalSymbols: internalByPath.get(entry.path) ?? [],
     }));
 
     /**
@@ -223,6 +229,7 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
       primaryLanguage: language,
       symbolsExtracted,
       filesWithSymbols: symbolsByPath.size,
+      filesWithInternalSymbols: internalByPath.size,
       archiveMs,
       totalMs: Date.now() - ingestStarted,
     });

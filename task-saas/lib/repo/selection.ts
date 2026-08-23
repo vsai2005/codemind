@@ -35,6 +35,31 @@ import { estimateTokens, queryTerms } from "@/lib/ai/context-manager";
  * more direct statement of what it does than the name they gave its file.
  */
 const SYMBOL_WEIGHT = 14;
+/**
+ * Weight for a term matching a name the file DECLARES but does not export.
+ *
+ * Below the exported weight, because a public contract is a stronger statement of
+ * purpose than a private helper — but far above zero, because it is still the name a
+ * developer chose for the thing that does the work. Measured on ky: source/core/Ky.ts
+ * exports one symbol (`Ky`) and declares calculateRetryDelay, retryRequest, cancelBody
+ * and raceBodyRead. Indexing only the export made the file that contains the entire
+ * retry loop invisible to every question about retrying.
+ */
+const INTERNAL_SYMBOL_WEIGHT = 12;
+
+/**
+ * Bonus per DISTINCT query term a file matches, however it matched.
+ *
+ * This is what separates breadth from depth. The weights above stack for a single term
+ * — a file both named `body.ts` and exporting `getBodySize` collects twice for "body" —
+ * which rewards a file that says one thing loudly. Asked "what happens to the request
+ * body when ky retries a request", the right answer is the file covering retry AND body
+ * AND request, not the one covering body twice.
+ *
+ * Without this, measured on the real fixtures: body.ts 37, Ky.ts 35. The file with the
+ * retry loop loses to the file that merely mentions bodies, by two points.
+ */
+const COVERAGE_BONUS = 8;
 /** Weight for a term found in the file's own name, where intent is clearest. */
 const BASENAME_WEIGHT = 10;
 /** Weight for a term in a directory segment. Real signal, much weaker. */
@@ -80,6 +105,8 @@ export interface IndexedFile {
   path: string;
   size: number;
   language: string | null;
+  /** Names the file declares internally — class members and top-level declarations. */
+  internalSymbols?: readonly string[];
   /**
    * Exported symbol names, extracted at ingest time. Empty for a repository indexed
    * before symbol extraction existed, or one whose archive could not be read — see
@@ -103,7 +130,29 @@ function pathWords(segment: string): string[] {
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .toLowerCase()
     .split(/[^a-z0-9]+/)
-    .filter((w) => w.length > 0);
+    .filter((w) => w.length > 0)
+    .map(stem);
+}
+
+/**
+ * Reduce a word to a form that survives pluralisation, and nothing more.
+ *
+ * Deliberately the most conservative rule that solves the observed problem: the
+ * question said "retries" and the code says "retry", and exact matching missed the one
+ * term that distinguished the file containing the retry loop from a file that merely
+ * mentions bodies.
+ *
+ * It must NOT collapse words that merely share a prefix. request/require and
+ * policy/police are different concepts, and a stemmer aggressive enough to merge them
+ * makes every question match more files and rank none of them well. Only plural
+ * suffixes are removed, which is why `-es` is stripped only after a sibilant: naive
+ * `-es` stripping turns "requires" into "requir" and stops it matching "require".
+ */
+function stem(word: string): string {
+  if (word.length > 4 && word.endsWith("ies")) return `${word.slice(0, -3)}y`;
+  if (word.length > 4 && /(?:s|x|z|ch|sh)es$/.test(word)) return word.slice(0, -2);
+  if (word.length > 3 && word.endsWith("s") && !word.endsWith("ss")) return word.slice(0, -1);
+  return word;
 }
 
 /**
@@ -114,21 +163,27 @@ function pathWords(segment: string): string[] {
  * are whatever happened to sort first.
  */
 export function scoreFiles(files: readonly IndexedFile[], question: string): ScoredFile[] {
-  const terms = queryTerms(question);
+  // Stemmed on both sides: the question's words and the file's words have to meet in
+  // the same form or the match never happens.
+  const terms = Array.from(new Set(queryTerms(question).map(stem)));
   if (terms.length === 0 || files.length === 0) return [];
 
   // How many paths contain each term at all, used to discount structural vocabulary.
   const documentFrequency = new Map<string, number>();
-  const wordsByPath = new Map<string, { base: string[]; dirs: string[]; symbols: string[] }>();
+  const wordsByPath = new Map<
+    string,
+    { base: string[]; dirs: string[]; symbols: string[]; internal: string[] }
+  >();
 
   for (const file of files) {
     const slash = file.path.lastIndexOf("/");
     const base = pathWords(file.path.slice(slash + 1));
     const dirs = slash > 0 ? pathWords(file.path.slice(0, slash)) : [];
     const symbols = (file.symbols ?? []).flatMap((symbol) => pathWords(symbol));
-    wordsByPath.set(file.path, { base, dirs, symbols });
+    const internal = (file.internalSymbols ?? []).flatMap((symbol) => pathWords(symbol));
+    wordsByPath.set(file.path, { base, dirs, symbols, internal });
 
-    const present = new Set([...base, ...dirs, ...symbols]);
+    const present = new Set([...base, ...dirs, ...symbols, ...internal]);
     for (const term of terms) {
       if (present.has(term)) {
         documentFrequency.set(term, (documentFrequency.get(term) ?? 0) + 1);
@@ -159,13 +214,21 @@ export function scoreFiles(files: readonly IndexedFile[], question: string): Sco
     if (!words) continue;
 
     let score = 0;
+    let termsMatched = 0;
+
     for (const term of useful) {
+      const before = score;
       if (words.symbols.includes(term)) score += SYMBOL_WEIGHT;
+      else if (words.internal.includes(term)) score += INTERNAL_SYMBOL_WEIGHT;
       if (words.base.includes(term)) score += BASENAME_WEIGHT;
       else if (words.base.some((w) => w.includes(term))) score += BASENAME_WEIGHT / 2;
       if (words.dirs.includes(term)) score += DIRECTORY_WEIGHT;
       if (file.language && file.language === term) score += LANGUAGE_WEIGHT;
+      if (score > before) termsMatched++;
     }
+
+    // Breadth across the question, on top of depth on any one term.
+    score += termsMatched * COVERAGE_BONUS;
 
     if (score <= 0) continue;
     score -= (file.path.split("/").length - 1) * DEPTH_PENALTY;
