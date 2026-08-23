@@ -129,6 +129,28 @@ function toTokenCount(value: number | undefined | null): number | null {
 const TURN_KEY_ASSUMED_LIVE_MS = 2 * 60_000;
 
 /**
+ * Backstop on a per-user generation slot, so an abandoned stream cannot hold one
+ * forever.
+ *
+ * acquireGenerationSlot tracks concurrency in an in-memory map with a limit of three.
+ * The slot is normally freed when the response body drains, errors, or is cancelled —
+ * but a client that vanishes without a terminal signal (dropped connection, killed
+ * mobile tab, a proxy giving up mid-stream) never produces one. Without a timeout that
+ * slot is held until the process restarts, and after three of them the user is locked
+ * out with an instant 429 "You already have 3 responses in progress" on every message,
+ * which the browser then shows as nothing at all.
+ *
+ * The provider key lease in lib/ai/gateway.ts already does this; the generation slot
+ * was simply never given the same treatment.
+ *
+ * Sized well above the longest legitimate generation rather than tightly: an artifact
+ * run was measured at 43s and a slow chat turn at 26s, and reclaiming a slot from a
+ * generation that is still streaming would cut off a reply the user is reading. Five
+ * minutes is far past anything real and still bounds the leak.
+ */
+const GENERATION_SLOT_MAX_LIFETIME_MS = 5 * 60_000;
+
+/**
  * Stable identifier for "this turn", used to make a retry a resume instead of a
  * second write.
  *
@@ -611,7 +633,16 @@ export async function POST(req: Request): Promise<Response> {
 
       // The generation outlives this function, so the slot travels with the stream.
       slotHandedToStream = true;
-      return releaseOnStreamEnd(artifactResponse, { onSettled: releaseSlot });
+      return releaseOnStreamEnd(artifactResponse, {
+        onSettled: releaseSlot,
+        timeoutMs: GENERATION_SLOT_MAX_LIFETIME_MS,
+        onTimeout: () => {
+          logger.warn("Reclaimed a generation slot from an abandoned artifact stream", {
+            conversationId: activeConversationId,
+          });
+          releaseSlot();
+        },
+      });
     }
 
     // Vision compatibility. Three distinct cases, none of which silently drops the image:
@@ -881,9 +912,19 @@ export async function POST(req: Request): Promise<Response> {
       ? createDataStreamPrefix(streamed, [{ codemindPlan: plan } as never])
       : streamed;
 
-    // Released when the client finishes reading, disconnects, or the stream errors.
+    // Released when the client finishes reading, disconnects, or the stream errors —
+    // and, failing all three, reclaimed by the timeout so the slot cannot leak.
     slotHandedToStream = true;
-    return releaseOnStreamEnd(withPlan, { onSettled: releaseSlot });
+    return releaseOnStreamEnd(withPlan, {
+      onSettled: releaseSlot,
+      timeoutMs: GENERATION_SLOT_MAX_LIFETIME_MS,
+      onTimeout: () => {
+        logger.warn("Reclaimed a generation slot from an abandoned chat stream", {
+          conversationId: activeConversationId,
+        });
+        releaseSlot();
+      },
+    });
     } finally {
       // Frees the slot on every path that did NOT hand it to a stream: validation
       // failures, ownership rejections, context overflow, capacity 503s.
