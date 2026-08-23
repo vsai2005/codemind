@@ -1,0 +1,205 @@
+import { prisma } from "@/lib/db";
+import { logger } from "@/lib/logger";
+import {
+  fetchRepoMeta,
+  fetchTree,
+  GitHubError,
+  isGitHubConfigured,
+  type RepoRef,
+} from "@/lib/repo/github";
+import { detectStructure, languageForPath, primaryLanguage } from "@/lib/repo/structure";
+
+/**
+ * Build the index for one public repository snapshot.
+ *
+ * Two GitHub requests total: one to resolve the default branch and its head commit,
+ * one to fetch the entire file tree recursively. Contents are never fetched here —
+ * this produces the LIST that query-time selection reads, and only the handful of
+ * files a question needs are ever downloaded.
+ *
+ * WALKING SKELETON. This runs to completion inside one request, which is honest only
+ * because it is two API calls regardless of repository size. The import graph, sliced
+ * resumable ingestion and rate-limit pausing are deliberately absent: the pipeline is
+ * proven end to end first, then made robust. What is NOT deferred is truncation
+ * detection, because a silently partial index is the one failure that looks like
+ * success.
+ */
+
+/**
+ * Ceiling on indexed files.
+ *
+ * Not an API-budget limit — the tree costs one request at any size. This bounds the
+ * database write and the row count per repository, and it is the point where a repo is
+ * large enough that file-path selection alone stops being good enough to find the right
+ * file. Crossing it is reported, never silently truncated.
+ */
+export const MAX_INDEXED_FILES = 4000;
+
+export type IngestResult =
+  | { ok: true; repositoryId: string; fileCount: number; reused: boolean }
+  | { ok: false; error: string };
+
+/**
+ * Index `ref`, or return the existing index for the same commit.
+ *
+ * Idempotent by commit sha: re-running against an unchanged repository finds the ready
+ * snapshot and returns it without spending the tree request. A snapshot left in a
+ * non-ready state by an interrupted run is rebuilt rather than trusted.
+ */
+export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
+  if (!isGitHubConfigured()) {
+    // 60 requests/hour unauthenticated cannot index anything real, and failing here is
+    // clearer than failing partway through with a rate-limit error.
+    return {
+      ok: false,
+      error: "Repository indexing is not configured on this server.",
+    };
+  }
+
+  let meta;
+  try {
+    meta = await fetchRepoMeta(ref);
+  } catch (error) {
+    return { ok: false, error: describe(error) };
+  }
+
+  const existing = await prisma.repository.findUnique({
+    where: {
+      owner_name_commitSha: { owner: ref.owner, name: ref.name, commitSha: meta.commitSha },
+    },
+    select: { id: true, status: true, fileCount: true },
+  });
+
+  // Only a `ready` snapshot may be reused. Anything else was interrupted, and its rows
+  // are a partial list that must not be mistaken for the repository.
+  if (existing?.status === "ready") {
+    return { ok: true, repositoryId: existing.id, fileCount: existing.fileCount, reused: true };
+  }
+
+  const repository =
+    existing ??
+    (await prisma.repository.create({
+      data: {
+        owner: ref.owner,
+        name: ref.name,
+        defaultBranch: meta.defaultBranch,
+        commitSha: meta.commitSha,
+        status: "pending",
+      },
+      select: { id: true, status: true, fileCount: true },
+    }));
+
+  await prisma.repository.update({
+    where: { id: repository.id },
+    data: { status: "indexing", error: null },
+  });
+
+  try {
+    const tree = await fetchTree(ref, meta.commitSha);
+
+    /**
+     * A truncated tree is a HARD FAILURE, never a warning.
+     *
+     * GitHub silently returns a partial list when a tree exceeds its response limits.
+     * An index built from it has the shape of a complete one — a status of `ready`, a
+     * plausible file count, real paths — and every later answer would be confidently
+     * wrong about the files it never saw. There is no honest way to answer "does this
+     * repo do X" from a list that might be missing X.
+     */
+    if (tree.truncated) {
+      await fail(
+        repository.id,
+        "This repository is too large to index: GitHub returned only part of its file list."
+      );
+      logger.warn("Rejected a repository with a truncated tree", {
+        owner: ref.owner,
+        name: ref.name,
+        returnedEntries: tree.entries.length,
+      });
+      return {
+        ok: false,
+        error:
+          "This repository is too large to index. GitHub only returned part of its file list, and an incomplete index would give wrong answers.",
+      };
+    }
+
+    if (tree.entries.length > MAX_INDEXED_FILES) {
+      await fail(repository.id, `Repository has ${tree.entries.length} files, over the limit.`);
+      return {
+        ok: false,
+        error: `This repository has ${tree.entries.length.toLocaleString()} files, above the ${MAX_INDEXED_FILES.toLocaleString()} currently supported.`,
+      };
+    }
+
+    const structure = detectStructure(tree.entries);
+    const language = primaryLanguage(structure);
+
+    const rows = tree.entries.map((entry) => ({
+      repositoryId: repository.id,
+      path: entry.path,
+      blobSha: entry.blobSha,
+      size: entry.size,
+      language: languageForPath(entry.path),
+    }));
+
+    /**
+     * The file rows and the terminal status commit together.
+     *
+     * `ready` must never be observable without the rows behind it. A reader that saw
+     * `ready` against a half-written list would answer from a partial repository and
+     * have no way to know — the same trap truncation sets, arrived at from the other
+     * direction. deleteMany first so a retry after an interrupted run replaces its
+     * partial rows rather than colliding with them.
+     */
+    await prisma.$transaction([
+      prisma.repositoryFile.deleteMany({ where: { repositoryId: repository.id } }),
+      prisma.repositoryFile.createMany({ data: rows, skipDuplicates: true }),
+      prisma.repository.update({
+        where: { id: repository.id },
+        data: {
+          status: "ready",
+          error: null,
+          fileCount: rows.length,
+          primaryLanguage: language,
+          structure: structure as unknown as object,
+        },
+      }),
+    ]);
+
+    logger.info("Indexed a repository", {
+      owner: ref.owner,
+      name: ref.name,
+      commitSha: meta.commitSha.slice(0, 8),
+      files: rows.length,
+      primaryLanguage: language,
+    });
+
+    return { ok: true, repositoryId: repository.id, fileCount: rows.length, reused: false };
+  } catch (error) {
+    const message = describe(error);
+    await fail(repository.id, message);
+    return { ok: false, error: message };
+  }
+}
+
+/** Record why an index could not be built, so the UI can say more than "failed". */
+async function fail(repositoryId: string, error: string): Promise<void> {
+  try {
+    await prisma.repository.update({
+      where: { id: repositoryId },
+      data: { status: "failed", error },
+    });
+  } catch (updateError) {
+    // The index is already unusable; losing the reason must not mask the original
+    // failure the caller is about to be told about.
+    logger.warn("Could not record a repository ingestion failure", {
+      repositoryId,
+      error: updateError instanceof Error ? updateError.message : "unknown",
+    });
+  }
+}
+
+function describe(error: unknown): string {
+  if (error instanceof GitHubError) return error.message;
+  return "Could not index that repository. Try again shortly.";
+}

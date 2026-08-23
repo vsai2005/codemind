@@ -36,6 +36,23 @@ export const RATE_LIMITS = {
   projects: { limit: 60, windowMs: 60_000 },
 
   /**
+   * POST /api/repositories — indexing a public GitHub repository.
+   *
+   * The one bucket here protecting a budget that belongs to EVERYONE. GitHub gives the
+   * server ~5,000 requests/hour on a single shared token, so a user indexing
+   * repositories in a loop does not just spend their own quota — they drain the pool
+   * and every other user's repository features stop working. That is an accidental
+   * denial of service, reachable with no intent to abuse and no way for the victims to
+   * tell what happened.
+   *
+   * Deliberately tight, because legitimate use barely touches it: indexing is two API
+   * calls and idempotent per commit, so re-indexing an unchanged repository returns the
+   * existing snapshot without contacting GitHub at all. Ten an hour is far above real
+   * use and far below what could exhaust the pool.
+   */
+  repositoryIngest: { limit: 10, windowMs: 3_600_000 },
+
+  /**
    * Sign-in attempts for ONE account, keyed by submitted email.
    *
    * This is the bucket that stops password guessing: an attacker targeting an account

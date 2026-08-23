@@ -124,6 +124,21 @@ model Project {
   /// the default sidebar listing. Archiving is never a soft delete.
   archivedAt DateTime?
 
+  /// The indexed repository this workspace asks questions about, if any.
+  ///
+  /// The link lives here rather than on Conversation for two reasons. The chat route
+  /// already loads the project when a conversation belongs to one, so a repo-backed
+  /// conversation costs no extra query; and every query against Project in that route
+  /// uses an explicit `select`, so adding this column cannot break a request that does
+  /// not ask for it. The same column on Conversation would be read by a `findFirst`
+  /// with no select — every column, every chat request — and shipping the code before
+  /// the migration would 500 the entire chat path rather than only the repo features.
+  ///
+  /// SetNull rather than Cascade: dropping an index must never delete the user's
+  /// workspace, conversations and instructions along with it.
+  repositoryId String?
+  repository   Repository? @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+
   conversations Conversation[]
 
   @@index([userId])
@@ -262,3 +277,98 @@ model Artifact {
   @@index([userId, createdAt])
 }
 
+
+// ---------------------------------------------------------------------------
+// Repository ingestion
+// ---------------------------------------------------------------------------
+
+enum RepositoryStatus {
+  pending
+  indexing
+  ready
+  failed
+}
+
+/// An indexed snapshot of a PUBLIC GitHub repository at one commit.
+///
+/// WHY AN INDEX AND NOT A CLONE
+/// Render gives this app no persistent disk and 512 MB of memory, and the free tier
+/// spins the instance down after ~15 minutes idle. A clone does not survive a cold
+/// start, re-cloning on every wake is not viable, and a large repo does not fit in
+/// memory even transiently. So nothing is stored but the file LIST; contents are
+/// fetched from the GitHub API at query time, for the handful of files a question
+/// actually needs.
+///
+/// WHY KEYED ON A COMMIT SHA
+/// The index is a pure function of the commit, so a snapshot is immutable and
+/// re-ingestion is idempotent by construction: a newer commit is a NEW row, and the
+/// previous one stays readable until the new one reaches `ready`. There is no moment
+/// where a half-built index has replaced a good one.
+///
+/// ⚠️ NOT SCOPED TO A USER, AND THAT IS ONLY SAFE WHILE REPOSITORIES ARE PUBLIC.
+/// Two users pointing at the same commit share one index, which is correct precisely
+/// because the content is public to begin with — the index reveals nothing its source
+/// does not. THE MOMENT PRIVATE REPOSITORIES ARE SUPPORTED THIS BECOMES A
+/// CROSS-TENANT LEAK: user A would read user B's private file list, and the fetch
+/// path would happily serve contents against a token that had access. Adding private
+/// repositories therefore REQUIRES scoping this model (per-owner rows, or an explicit
+/// access-grant table) before any private URL is accepted. Do not treat the sharing
+/// here as a general property; it is a consequence of the public-only scope.
+model Repository {
+  id            String           @id @default(cuid())
+  /// GitHub owner and repo name, stored lowercase so lookups are case-insensitive.
+  owner         String
+  name          String
+  defaultBranch String
+  /// Head commit of the default branch when this snapshot was taken.
+  commitSha     String
+
+  /// Never inferred from row counts. A reader may only trust an index whose status is
+  /// `ready`; anything else is partial, and answering from a partial index produces
+  /// confident architectural claims about files that were never seen.
+  status        RepositoryStatus @default(pending)
+  /// Set when status is `failed`, so the UI can say what went wrong.
+  error         String?
+
+  /// Extension counts, manifest, and detected entry points. Shape is owned by
+  /// lib/repo/structure.ts rather than the schema, so it can grow without migrations.
+  structure     Json?
+  /// Dominant language by file count. The import graph, when it exists, covers this
+  /// one language only.
+  primaryLanguage String?
+  fileCount     Int              @default(0)
+
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  files         RepositoryFile[]
+  projects      Project[]
+
+  /// One row per snapshot. Re-ingesting the same commit finds the existing index
+  /// instead of rebuilding it, which is what makes a retry after a failure cheap.
+  @@unique([owner, name, commitSha])
+  @@index([owner, name])
+}
+
+/// One entry from the repository's file tree. Contents are NOT stored — only what is
+/// needed to decide whether a file is worth fetching.
+///
+/// `size` is the load-bearing column: it comes free from the tree API and lets the
+/// selector estimate token cost and stay inside the context budget BEFORE spending a
+/// GitHub API call per file. Without it, selection would have to fetch to find out.
+model RepositoryFile {
+  id           String     @id @default(cuid())
+  repositoryId String
+  repository   Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  /// POSIX path relative to the repo root, exactly as GitHub reports it.
+  path         String
+  /// Git blob SHA, so a file can be fetched by content address rather than by ref.
+  blobSha      String
+  /// Bytes, from the tree API.
+  size         Int
+  /// Derived from the extension. Null for files with no recognised extension.
+  language     String?
+
+  @@unique([repositoryId, path])
+  @@index([repositoryId, language])
+}

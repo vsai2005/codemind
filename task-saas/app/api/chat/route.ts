@@ -38,6 +38,8 @@ import {
   validateSummary,
   SUMMARY_MAX_OUTPUT_TOKENS,
 } from "@/lib/ai/summarization";
+import { fetchFileContent } from "@/lib/repo/github";
+import { fallbackFiles, scoreFiles, selectWithinBudget } from "@/lib/repo/selection";
 import { createHash } from "node:crypto";
 
 /**
@@ -149,6 +151,35 @@ const TURN_KEY_ASSUMED_LIVE_MS = 2 * 60_000;
  * minutes is far past anything real and still bounds the leak.
  */
 const GENERATION_SLOT_MAX_LIFETIME_MS = 5 * 60_000;
+
+/**
+ * How many indexed files are ranked for one question.
+ *
+ * Ranking is pure database work, so this bounds memory rather than API budget — 4,000
+ * rows of path and size is well under a megabyte, which matters on a 512 MB instance.
+ */
+const REPOSITORY_SELECTION_SCAN_LIMIT = 4000;
+
+/**
+ * Share of the model's window that repository files may be fetched against.
+ *
+ * Slightly under the REPOSITORY_FILE_RATIO the context manager packs with, so
+ * selection cannot fetch more than packing will accept. Overshooting would spend
+ * GitHub requests on files that are then dropped for space — the exact waste the
+ * size-based budgeting exists to avoid.
+ */
+const REPOSITORY_FETCH_ALLOWANCE_RATIO = 0.3;
+
+/**
+ * Files read per question.
+ *
+ * One request each against a budget shared by every user, so this is the per-turn cost
+ * of the whole feature. Three is enough to answer "how does X work" for a file and its
+ * closest neighbours, and small enough that a conversation cannot quietly drain the
+ * pool. Raising it is the first thing to try when selection is right but the answer is
+ * thin — and the first thing to suspect when the budget disappears.
+ */
+const MAX_REPOSITORY_FILES_PER_TURN = 3;
 
 /**
  * Stable identifier for "this turn", used to make a retry a resume instead of a
@@ -551,13 +582,60 @@ export async function POST(req: Request): Promise<Response> {
     // that somehow referenced another user's project would still read nothing.
     let projectInstructions: string | null = null;
     let projectMemory: Array<{ title: string; items: string[] }> | null = null;
+    /** Set only for a project backed by a fully indexed repository. */
+    let repository: {
+      id: string;
+      owner: string;
+      name: string;
+      commitSha: string;
+      entryPoints: string[];
+    } | null = null;
 
     if (activeProjectId) {
       const project = await prisma.project.findFirst({
         where: { id: activeProjectId, userId },
-        select: { instructions: true, memory: true },
+        select: {
+          instructions: true,
+          memory: true,
+          // Loaded with the project the route already reads, so a repo-backed
+          // conversation costs no extra query.
+          repository: {
+            select: {
+              id: true,
+              owner: true,
+              name: true,
+              commitSha: true,
+              status: true,
+              // Detected at ingestion, used when path scoring finds nothing.
+              structure: true,
+            },
+          },
+        },
       });
       if (project) {
+        /**
+         * Only a `ready` index is usable, and a partial one is ignored entirely rather
+         * than used with a caveat.
+         *
+         * A caveat does not work here: people read answers, not warnings. An answer
+         * drawn from 40% of a repository is indistinguishable from a complete one —
+         * same confident tone, same specific file names — so the only honest options
+         * are a full index or none. Ignoring it means the model answers from the
+         * conversation alone, which is at least a failure mode users recognise.
+         */
+        if (project.repository?.status === "ready") {
+          const structure = project.repository.structure as { entryPoints?: unknown } | null;
+          const entryPoints = Array.isArray(structure?.entryPoints)
+            ? structure.entryPoints.filter((p): p is string => typeof p === "string")
+            : [];
+          repository = {
+            id: project.repository.id,
+            owner: project.repository.owner,
+            name: project.repository.name,
+            commitSha: project.repository.commitSha,
+            entryPoints,
+          };
+        }
         projectInstructions = project.instructions;
         const raw = project.memory;
         if (Array.isArray(raw)) {
@@ -574,6 +652,28 @@ export async function POST(req: Request): Promise<Response> {
       }
     }
 
+    /**
+     * Source files for a repo-backed question.
+     *
+     * Selection reads only the stored index — path, size, language — so ranking and
+     * budgeting cost no GitHub requests; a request is spent only on a file that has
+     * already been chosen and priced. Fetching happens here rather than inside
+     * ContextManager because that module is synchronous and must stay free of network
+     * calls; it receives the finished text and budgets it like every other layer.
+     *
+     * Entirely additive: a conversation with no indexed repository takes none of this
+     * and reaches buildContext exactly as before.
+     */
+    let repositoryFiles: Array<{ path: string; content: string }> | undefined;
+
+    if (repository) {
+      repositoryFiles = await loadRepositoryFiles({
+        repository,
+        question: userText,
+        contextTokens: resolved.effectiveContextTokens,
+      });
+    }
+
     const buildContext = (maxRecentTurns?: number) =>
       ContextManager.buildContext(historicalMessages, activeUserMessage, existingSummary, {
         hasImage: Boolean(image),
@@ -585,6 +685,7 @@ export async function POST(req: Request): Promise<Response> {
         outputTokens: resolved.effectiveOutputTokens,
         projectInstructions,
         projectMemory,
+        repositoryFiles,
       });
 
     let context = buildContext();
@@ -1183,4 +1284,95 @@ async function persistTurn(
   });
 
   return created;
+}
+
+/**
+ * Rank the indexed files against a question and fetch the ones worth reading.
+ *
+ * The two halves are deliberately separate. Ranking and budgeting run against the
+ * database alone, so a file is priced from its stored size before any request is
+ * spent; only the survivors are downloaded. That is what keeps a shared GitHub budget
+ * from being consumed by files that would have been dropped at packing time anyway.
+ *
+ * Every failure here is non-fatal. A repository that cannot be read should degrade to
+ * an ordinary conversation — the model answering without the code is worse than
+ * answering with it, but far better than the turn failing outright.
+ */
+async function loadRepositoryFiles(params: {
+  repository: {
+    id: string;
+    owner: string;
+    name: string;
+    commitSha: string;
+    entryPoints: string[];
+  };
+  question: string;
+  contextTokens: number;
+}): Promise<Array<{ path: string; content: string }> | undefined> {
+  const { repository, question, contextTokens } = params;
+
+  try {
+    const indexed = await prisma.repositoryFile.findMany({
+      where: {
+        repositoryId: repository.id,
+        // Only files with a recognised source extension are candidates. Lockfiles and
+        // binaries are still indexed so the file list stays honest, but reading one
+        // spends a request and a large share of the budget to tell the model nothing.
+        NOT: { language: null },
+      },
+      select: { path: true, size: true, language: true },
+      take: REPOSITORY_SELECTION_SCAN_LIMIT,
+    });
+
+    if (indexed.length === 0) return undefined;
+
+    /**
+     * A question about behaviour rather than filenames scores nothing — the ceiling of
+     * path-only selection, measured rather than assumed. See fallbackFiles for the
+     * case that demonstrates it and why entry points are the honest answer until a
+     * symbol index exists.
+     */
+    const scored = scoreFiles(indexed, question);
+    const candidates =
+      scored.length > 0
+        ? scored
+        : fallbackFiles(indexed, repository.entryPoints, MAX_REPOSITORY_FILES_PER_TURN);
+    if (candidates.length === 0) return undefined;
+
+    const allowance = Math.floor(contextTokens * REPOSITORY_FETCH_ALLOWANCE_RATIO);
+    const chosen = selectWithinBudget(candidates, allowance, MAX_REPOSITORY_FILES_PER_TURN);
+    if (chosen.length === 0) return undefined;
+
+    const ref = { owner: repository.owner, name: repository.name };
+    const files: Array<{ path: string; content: string }> = [];
+
+    for (const file of chosen) {
+      try {
+        const content = await fetchFileContent(ref, repository.commitSha, file.path);
+        files.push({ path: file.path, content });
+      } catch (error) {
+        // One unreadable file must not lose the others already fetched.
+        logger.warn("Could not read a repository file", {
+          path: file.path,
+          error: error instanceof Error ? error.message : "unknown",
+        });
+      }
+    }
+
+    logger.debug("Repository files selected", {
+      repositoryId: repository.id,
+      candidates: indexed.length,
+      scored: scored.length,
+      usedFallback: scored.length === 0,
+      fetched: files.length,
+    });
+
+    return files.length > 0 ? files : undefined;
+  } catch (error) {
+    logger.warn("Repository file selection failed", {
+      repositoryId: repository.id,
+      error: error instanceof Error ? error.message : "unknown",
+    });
+    return undefined;
+  }
 }

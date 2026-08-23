@@ -49,6 +49,17 @@ const SUMMARY_BUDGET_RATIO = 0.1;
 const CONVERSATION_RETRIEVAL_RATIO = 0.15;
 const ATTACHMENT_RETRIEVAL_RATIO = 0.15;
 
+/**
+ * Share of the window for source files fetched from an indexed repository.
+ *
+ * The largest single allowance here, because a repo-backed question is usually ABOUT
+ * the code: a file the model cannot see is a file it will guess about. Still a
+ * fraction rather than the whole budget — the conversation, the summary and the user's
+ * own message all still have to fit, and a repo question that loses its own history is
+ * no better than one that loses the code.
+ */
+const REPOSITORY_FILE_RATIO = 0.35;
+
 const MAX_RETRIEVED_TURNS = 3;
 const RETRIEVED_MESSAGE_MAX_CHARS = 1200;
 const MAX_ATTACHMENT_CHUNKS = 5;
@@ -139,7 +150,15 @@ function clampToTokens(text: string, maxTokens: number): string {
 // Scoring
 // ---------------------------------------------------------------------------
 
-function queryTerms(query: string): string[] {
+/**
+ * Split a question into the terms worth matching on.
+ *
+ * Exported because repository file selection asks the same question of a user's
+ * message that retrieval does. `scoreText` below is deliberately NOT exported: it
+ * scores prose, and paths need different weighting — see lib/repo/selection.ts for
+ * why forcing that one to be shared would have been the wrong kind of reuse.
+ */
+export function queryTerms(query: string): string[] {
   return Array.from(
     new Set(
       query
@@ -306,6 +325,17 @@ export interface BuildContextOptions {
   retrievalCandidates?: RetrievalMessage[];
   /** Hard cap on recent turns. Used by the one-shot provider-error retry. */
   maxRecentTurns?: number;
+  /**
+   * Source files fetched from an indexed repository for this turn, already selected
+   * and budgeted by lib/repo/selection.ts.
+   *
+   * Passed in rather than fetched here: this module must stay synchronous and free of
+   * network calls, and selection needs the repository index that only the route has
+   * loaded. What happens here is what happens to every other memory layer — it is
+   * charged against the same budget, clamped by the same helper, and dropped when
+   * there is no room.
+   */
+  repositoryFiles?: Array<{ path: string; content: string }>;
 }
 
 export interface BuildContextResult {
@@ -473,6 +503,59 @@ Durable facts about this project:
           contextBlocks += block;
           budget -= estimateTokens(block);
         }
+      }
+    }
+
+    // --- 2c. Repository source files ---------------------------------------------
+    // After the project's own instructions and memory, before the summary: the user's
+    // standing rules outrank code, and code outranks compressed history of old turns.
+    //
+    // Files are packed WHOLE or not at all. A file cut in half still reads to the model
+    // as a complete file, which is how a confident answer about a function that was
+    // truncated away happens. Clamping applies only to a single file that cannot fit on
+    // its own, where the alternative is showing nothing of it.
+    if (options.repositoryFiles && options.repositoryFiles.length > 0) {
+      const header = `
+
+--- REPOSITORY FILES ---
+Source from the repository this project is about. Paths are relative to the repo root.
+`;
+      const allowance =
+        Math.min(Math.floor(totalBudget * REPOSITORY_FILE_RATIO), Math.max(0, budget)) -
+        estimateTokens(header);
+
+      const rendered: string[] = [];
+      let used = 0;
+
+      for (const file of options.repositoryFiles) {
+        const block = `
+=== ${file.path} ===
+${file.content}`;
+        const cost = estimateTokens(block);
+
+        if (used + cost <= allowance) {
+          rendered.push(block);
+          used += cost;
+          continue;
+        }
+
+        // Only the first file may be clamped, and only when nothing has fit yet:
+        // otherwise a large file late in the list would be silently halved while
+        // smaller complete files were available.
+        if (rendered.length === 0 && allowance > 0) {
+          const clamped = clampToTokens(block, allowance);
+          if (clamped.length > 0) {
+            rendered.push(clamped);
+            used += estimateTokens(clamped);
+          }
+        }
+        break;
+      }
+
+      if (rendered.length > 0) {
+        const block = `${header}${rendered.join("\n")}`;
+        contextBlocks += block;
+        budget -= estimateTokens(block);
       }
     }
 
