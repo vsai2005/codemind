@@ -182,6 +182,15 @@ const REPOSITORY_FETCH_ALLOWANCE_RATIO = 0.3;
 const MAX_REPOSITORY_FILES_PER_TURN = 3;
 
 /**
+ * How much of the user's question is echoed into the empty-selection warning.
+ *
+ * Enough to recognise which turn failed and reproduce it, short enough that a pasted
+ * stack trace or file cannot fill the log. The value is scrubbed before truncation, so
+ * a credential pasted into a question does not reach the logs either.
+ */
+const REPOSITORY_QUERY_LOG_CHARS = 120;
+
+/**
  * Stable identifier for "this turn", used to make a retry a resume instead of a
  * second write.
  *
@@ -1328,7 +1337,40 @@ async function loadRepositoryFiles(params: {
       take: REPOSITORY_SELECTION_SCAN_LIMIT,
     });
 
-    if (indexed.length === 0) return undefined;
+    /**
+     * Every empty result below is reported at warn level.
+     *
+     * A turn that reaches here has a repository attached and READY, so the user is
+     * asking about code and expecting the code to be in view. Returning nothing means
+     * the model answers from the conversation alone and sounds exactly as confident as
+     * it would with the files — the failure is invisible in the reply. Until this
+     * existed the only way to investigate "the AI ignored my repo" was SQL against
+     * RepositoryFile, because the one warn on this path fires on a thrown error and
+     * none of these four exits throws.
+     *
+     * The `reason` distinguishes them, since they need completely different fixes:
+     * an index with no source files is an ingestion problem, nothing scoring is a
+     * selection problem, nothing fitting is a budget problem, and every fetch failing
+     * is a GitHub problem.
+     */
+    const empty = (
+      reason: string,
+      counts: { candidates: number; scored: number; chosen: number; fetched: number }
+    ): undefined => {
+      logger.warn("Repository attached but no files reached the model", {
+        repositoryId: repository.id,
+        reason,
+        // Scrubbed and truncated: a question is user content, and it is here only to
+        // make the failure reproducible.
+        query: scrubForLog(question).slice(0, REPOSITORY_QUERY_LOG_CHARS),
+        ...counts,
+      });
+      return undefined;
+    };
+
+    if (indexed.length === 0) {
+      return empty("index_has_no_source_files", { candidates: 0, scored: 0, chosen: 0, fetched: 0 });
+    }
 
     /**
      * A question about behaviour rather than filenames scores nothing — the ceiling of
@@ -1341,11 +1383,30 @@ async function loadRepositoryFiles(params: {
       scored.length > 0
         ? scored
         : fallbackFiles(indexed, repository.entryPoints, MAX_REPOSITORY_FILES_PER_TURN);
-    if (candidates.length === 0) return undefined;
+    // Currently unreachable, and deliberately checked anyway: fallbackFiles(indexed, ...)
+    // cannot return empty while `indexed` is non-empty — with no entry points matched it
+    // falls through to "remaining files by depth", which is `indexed` itself. Verified,
+    // not assumed. Kept as a guard against that contract changing rather than removed,
+    // since a silent assumption is exactly the failure class this change exists to close.
+    if (candidates.length === 0) {
+      return empty("no_candidates_after_fallback", {
+        candidates: indexed.length,
+        scored: scored.length,
+        chosen: 0,
+        fetched: 0,
+      });
+    }
 
     const allowance = Math.floor(contextTokens * REPOSITORY_FETCH_ALLOWANCE_RATIO);
     const chosen = selectWithinBudget(candidates, allowance, MAX_REPOSITORY_FILES_PER_TURN);
-    if (chosen.length === 0) return undefined;
+    if (chosen.length === 0) {
+      return empty("none_fit_token_budget", {
+        candidates: indexed.length,
+        scored: scored.length,
+        chosen: 0,
+        fetched: 0,
+      });
+    }
 
     const ref = { owner: repository.owner, name: repository.name };
     const files: Array<{ path: string; content: string }> = [];
@@ -1371,7 +1432,14 @@ async function loadRepositoryFiles(params: {
       fetched: files.length,
     });
 
-    return files.length > 0 ? files : undefined;
+    return files.length > 0
+      ? files
+      : empty("all_file_fetches_failed", {
+          candidates: indexed.length,
+          scored: scored.length,
+          chosen: chosen.length,
+          fetched: 0,
+        });
   } catch (error) {
     logger.warn("Repository file selection failed", {
       repositoryId: repository.id,
