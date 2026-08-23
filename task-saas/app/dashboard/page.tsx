@@ -1,13 +1,14 @@
 "use client";
 
 import { useChat } from "ai/react";
-import { Suspense, useCallback, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { ChatMessage } from "@/components/chat/ChatMessage";
 import { Composer } from "@/components/chat/Composer";
 import { ThinkingIndicator } from "@/components/chat/ThinkingIndicator";
 import { ModelSelector } from "@/components/chat/ModelSelector";
+import { ChatError } from "@/components/chat/ChatError";
 import { ProjectSwitcher } from "@/components/projects/ProjectSwitcher";
 
 /**
@@ -73,6 +74,16 @@ function ChatWorkspace(): React.ReactElement {
   const searchParams = useSearchParams();
   const projectId = searchParams.get("project");
 
+  /**
+   * The text of the turn currently in flight.
+   *
+   * Held in a ref because a failed send loses it from BOTH places it normally lives:
+   * useChat clears the input on submit, and its restoreMessagesOnFailure() then strips
+   * the message back out of the transcript. Without this the user's typing is simply
+   * gone and there is nothing left to retry.
+   */
+  const lastAttemptRef = useRef("");
+
   const {
     messages,
     input,
@@ -84,6 +95,7 @@ function ChatWorkspace(): React.ReactElement {
     data,
     setData,
     stop,
+    error,
   } = useChat({
     api: "/api/chat",
     // Read at request time, so switching models takes effect on the next message
@@ -98,16 +110,22 @@ function ChatWorkspace(): React.ReactElement {
         window.history.pushState({}, "", `/chat/${id}`);
       }
     },
+    // Put the text back where the user can see and edit it. The banner says what went
+    // wrong; this is what makes the failure recoverable without retyping.
+    onError: () => {
+      if (lastAttemptRef.current) setInput(lastAttemptRef.current);
+    },
   });
 
   // Progress parts accumulate across turns; clear them when a new turn starts.
   const submit = useCallback(
     (event: React.FormEvent<HTMLFormElement>) => {
+      lastAttemptRef.current = input;
       setData([]);
       setStopped(false);
       handleSubmit(event);
     },
-    [handleSubmit, setData]
+    [handleSubmit, setData, input]
   );
 
   // Cancels the in-flight generation. Whatever streamed so far is kept.
@@ -118,12 +136,42 @@ function ChatWorkspace(): React.ReactElement {
 
   const appendMessage = useCallback(
     (message: { role: "user"; content: string }) => {
+      lastAttemptRef.current = message.content;
       setData([]);
       setStopped(false);
       return append(message);
     },
     [append, setData]
   );
+
+  /**
+   * Resend the message that failed.
+   *
+   * `append` rather than useChat's `reload()`: reload re-sends the last request derived
+   * from `messages`, and the failed user message is no longer in `messages` — the SDK
+   * removed it. Reloading would replay the PREVIOUS successful turn instead of the one
+   * that broke. Appending the captured text sends what the user actually meant, and
+   * clears the input so the same text is not left sitting there twice.
+   */
+  const retryLastMessage = useCallback(() => {
+    const text = lastAttemptRef.current;
+    if (!text || isLoading) return;
+    setInput("");
+    void appendMessage({ role: "user", content: text });
+  }, [appendMessage, isLoading, setInput]);
+
+  /**
+   * Cancel an in-flight generation when this page goes away.
+   *
+   * A stream that is abandoned rather than cancelled keeps holding one of the user's
+   * three concurrency slots server-side for as long as it runs, and a slow turn was
+   * measured at 26 seconds. Navigating away from a few of those exhausts the pool and
+   * the next message comes back an instant 429. The ref keeps the dependency list empty
+   * so this fires on unmount only, never on re-render.
+   */
+  const stopRef = useRef(stop);
+  stopRef.current = stop;
+  useEffect(() => () => stopRef.current(), []);
 
   return (
     <div className="relative flex h-full flex-1 flex-col md:ml-64">
@@ -171,6 +219,11 @@ function ChatWorkspace(): React.ReactElement {
           {isLoading && <ThinkingIndicator data={data} />}
           {!isLoading && stopped && (
             <p className="ml-4 text-[12px] font-medium text-gray-400">Generation stopped</p>
+          )}
+          {/* Sits where the reply would have been, so the failure lands where the
+              user is already looking rather than in a corner. */}
+          {error && !isLoading && (
+            <ChatError error={error} onRetry={retryLastMessage} disabled={isLoading} />
           )}
         </div>
       </div>
