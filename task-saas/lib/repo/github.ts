@@ -254,6 +254,28 @@ export async function fetchTree(ref: RepoRef, commitSha: string): Promise<RepoTr
 }
 
 /**
+ * The whole repository as a gzipped tar, in ONE request.
+ *
+ * Measured at one rate-limit unit regardless of size (see lib/repo/archive.ts for the
+ * numbers). Returns the response body as a stream so the caller can decompress
+ * incrementally rather than buffering an entire repository on a 512 MB instance.
+ *
+ * GitHub answers with a 302 to codeload.github.com; fetch follows it automatically and
+ * the redirect target does not consume additional quota.
+ */
+export async function fetchTarball(
+  ref: RepoRef,
+  commitSha: string
+): Promise<ReadableStream<Uint8Array>> {
+  const response = await githubFetch(`/repos/${ref.owner}/${ref.name}/tarball/${commitSha}`);
+  if (!response.ok) throw classify(response);
+  if (!response.body) {
+    throw new GitHubError({ kind: "unavailable", detail: "empty_archive" }, "GitHub returned an empty archive.");
+  }
+  return response.body;
+}
+
+/**
  * One file's contents, by path at a pinned commit.
  *
  * Uses the raw media type so the response is the file itself rather than base64 inside

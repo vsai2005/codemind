@@ -338,6 +338,19 @@ model Repository {
   primaryLanguage String?
   fileCount     Int              @default(0)
 
+  /// Whether exported symbols were actually extracted for this snapshot.
+  ///
+  /// LOAD-BEARING, and the reason it exists is worth stating: without it, a file with
+  /// no symbols recorded is indistinguishable from a file whose symbols were never
+  /// looked for. Selection would score against an empty set and silently behave as
+  /// though it had checked and found nothing — absence of data passing as data showing
+  /// absence, which is the same failure class as a truncated tree wearing a different
+  /// costume.
+  ///
+  /// False for a snapshot indexed before symbol extraction existed, and for one whose
+  /// archive could not be read. Both are usable, degraded, and KNOWN to be degraded.
+  symbolsExtracted Boolean       @default(false)
+
   createdAt     DateTime         @default(now())
   updatedAt     DateTime         @updatedAt
 
@@ -368,6 +381,17 @@ model RepositoryFile {
   size         Int
   /// Derived from the extension. Null for files with no recognised extension.
   language     String?
+
+  /// Exported symbol names — functions, classes, consts, types — for the primary
+  /// language only. Empty when the file exports nothing, when it is not in the primary
+  /// language, or when extraction never ran; Repository.symbolsExtracted is what
+  /// separates the last case from the first two.
+  ///
+  /// An array column rather than a join table: selection already loads every candidate
+  /// into memory to rank it, so a reverse index buys nothing today, while a 2,000-file
+  /// repository would add roughly 10,000 rows against a 1 GB quota. Promote it to a
+  /// table when exact symbol lookup ("go to definition") needs one.
+  symbols      String[]   @default([])
 
   @@unique([repositoryId, path])
   @@index([repositoryId, language])

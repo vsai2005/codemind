@@ -2,11 +2,14 @@ import { prisma } from "@/lib/db";
 import { logger } from "@/lib/logger";
 import {
   fetchRepoMeta,
+  fetchTarball,
   fetchTree,
   GitHubError,
   isGitHubConfigured,
   type RepoRef,
 } from "@/lib/repo/github";
+import { readTarball } from "@/lib/repo/archive";
+import { extractSymbols, supportsSymbols } from "@/lib/repo/symbols";
 import { detectStructure, languageForPath, primaryLanguage } from "@/lib/repo/structure";
 
 /**
@@ -47,6 +50,8 @@ export type IngestResult =
  * non-ready state by an interrupted run is rebuilt rather than trusted.
  */
 export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
+  const ingestStarted = Date.now();
+
   if (!isGitHubConfigured()) {
     // 60 requests/hour unauthenticated cannot index anything real, and failing here is
     // clearer than failing partway through with a rate-limit error.
@@ -134,12 +139,46 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
     const structure = detectStructure(tree.entries);
     const language = primaryLanguage(structure);
 
+    /**
+     * Exported symbols, from ONE extra request rather than one per file.
+     *
+     * Best-effort: a repository that cannot be archived is still perfectly usable
+     * indexed by path alone, so a failure here degrades rather than aborts. What must
+     * NOT happen is degrading silently — `symbolsExtracted` records whether this
+     * actually ran, so selection can never mistake "no symbols recorded" for "this
+     * file exports nothing".
+     */
+    const symbolsByPath = new Map<string, string[]>();
+    let symbolsExtracted = false;
+    const archiveStarted = Date.now();
+
+    if (language && supportsSymbols(language)) {
+      try {
+        const stream = await fetchTarball(ref, meta.commitSha);
+        await readTarball(stream, (entry) => {
+          if (!supportsSymbols(languageForPath(entry.path))) return;
+          const symbols = extractSymbols(entry.content);
+          if (symbols.length > 0) symbolsByPath.set(entry.path, symbols);
+        });
+        symbolsExtracted = true;
+      } catch (error) {
+        logger.warn("Symbol extraction failed; indexing by path only", {
+          owner: ref.owner,
+          name: ref.name,
+          error: error instanceof Error ? error.message : "unknown",
+        });
+      }
+    }
+
+    const archiveMs = Date.now() - archiveStarted;
+
     const rows = tree.entries.map((entry) => ({
       repositoryId: repository.id,
       path: entry.path,
       blobSha: entry.blobSha,
       size: entry.size,
       language: languageForPath(entry.path),
+      symbols: symbolsByPath.get(entry.path) ?? [],
     }));
 
     /**
@@ -161,17 +200,31 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
           error: null,
           fileCount: rows.length,
           primaryLanguage: language,
+          symbolsExtracted,
           structure: structure as unknown as object,
         },
       }),
     ]);
 
+    /**
+     * Duration and size are logged from the first version on purpose.
+     *
+     * Ingestion runs single-shot inside one request, which is fine until it is not.
+     * When a large repository eventually times out, the threshold should come from
+     * these numbers rather than from a guess about where it broke.
+     */
     logger.info("Indexed a repository", {
       owner: ref.owner,
       name: ref.name,
       commitSha: meta.commitSha.slice(0, 8),
       files: rows.length,
+      sourceFiles: structure.sourceFiles,
+      totalBytes: tree.entries.reduce((sum, e) => sum + e.size, 0),
       primaryLanguage: language,
+      symbolsExtracted,
+      filesWithSymbols: symbolsByPath.size,
+      archiveMs,
+      totalMs: Date.now() - ingestStarted,
     });
 
     return { ok: true, repositoryId: repository.id, fileCount: rows.length, reused: false };

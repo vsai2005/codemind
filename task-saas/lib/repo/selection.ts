@@ -26,12 +26,32 @@ import { estimateTokens, queryTerms } from "@/lib/ai/context-manager";
  * approach — a different question.
  */
 
+/**
+ * Weight for a term matching an EXPORTED SYMBOL, the strongest signal available.
+ *
+ * Above the basename weight deliberately. A file named `object.js` is about objects in
+ * some sense; a file exporting `isPlainObject` answers "how does this decide whether a
+ * value is a plain object" outright. The name a developer gave a function is a far
+ * more direct statement of what it does than the name they gave its file.
+ */
+const SYMBOL_WEIGHT = 14;
 /** Weight for a term found in the file's own name, where intent is clearest. */
 const BASENAME_WEIGHT = 10;
 /** Weight for a term in a directory segment. Real signal, much weaker. */
 const DIRECTORY_WEIGHT = 3;
 /** Weight for a term matching the extension-derived language ("typescript"). */
 const LANGUAGE_WEIGHT = 2;
+
+/**
+ * Penalty for TypeScript declaration files.
+ *
+ * A `.d.ts` exports exactly the same symbol names as the implementation it describes,
+ * so on symbols alone it ties with the real code and can win on alphabetical order.
+ * But it contains signatures, not behaviour — a question about how something WORKS is
+ * never answered by a type declaration. Small enough that a declaration still ranks
+ * when nothing else matches, which is right for a question about a type.
+ */
+const DECLARATION_PENALTY = 6;
 
 /**
  * A term shared by most of the repository says nothing about any one file. Above this
@@ -60,13 +80,24 @@ export interface IndexedFile {
   path: string;
   size: number;
   language: string | null;
+  /**
+   * Exported symbol names, extracted at ingest time. Empty for a repository indexed
+   * before symbol extraction existed, or one whose archive could not be read — see
+   * Repository.symbolsExtracted, which is what distinguishes "nothing exported" from
+   * "never looked".
+   */
+  symbols?: readonly string[];
 }
 
 export interface ScoredFile extends IndexedFile {
   score: number;
 }
 
-/** Split a path into lowercase words, breaking on separators AND camelCase. */
+/**
+ * Split a path segment or a symbol into lowercase words, breaking on separators AND
+ * camelCase. One rule for both, because `isPlainObject` and `is-plain-object` name the
+ * same thing and a question says "plain object" either way.
+ */
 function pathWords(segment: string): string[] {
   return segment
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
@@ -88,15 +119,16 @@ export function scoreFiles(files: readonly IndexedFile[], question: string): Sco
 
   // How many paths contain each term at all, used to discount structural vocabulary.
   const documentFrequency = new Map<string, number>();
-  const wordsByPath = new Map<string, { base: string[]; dirs: string[] }>();
+  const wordsByPath = new Map<string, { base: string[]; dirs: string[]; symbols: string[] }>();
 
   for (const file of files) {
     const slash = file.path.lastIndexOf("/");
     const base = pathWords(file.path.slice(slash + 1));
     const dirs = slash > 0 ? pathWords(file.path.slice(0, slash)) : [];
-    wordsByPath.set(file.path, { base, dirs });
+    const symbols = (file.symbols ?? []).flatMap((symbol) => pathWords(symbol));
+    wordsByPath.set(file.path, { base, dirs, symbols });
 
-    const present = new Set([...base, ...dirs]);
+    const present = new Set([...base, ...dirs, ...symbols]);
     for (const term of terms) {
       if (present.has(term)) {
         documentFrequency.set(term, (documentFrequency.get(term) ?? 0) + 1);
@@ -128,6 +160,7 @@ export function scoreFiles(files: readonly IndexedFile[], question: string): Sco
 
     let score = 0;
     for (const term of useful) {
+      if (words.symbols.includes(term)) score += SYMBOL_WEIGHT;
       if (words.base.includes(term)) score += BASENAME_WEIGHT;
       else if (words.base.some((w) => w.includes(term))) score += BASENAME_WEIGHT / 2;
       if (words.dirs.includes(term)) score += DIRECTORY_WEIGHT;
@@ -136,6 +169,7 @@ export function scoreFiles(files: readonly IndexedFile[], question: string): Sco
 
     if (score <= 0) continue;
     score -= (file.path.split("/").length - 1) * DEPTH_PENALTY;
+    if (file.path.endsWith(".d.ts")) score -= DECLARATION_PENALTY;
     if (score > 0) scored.push({ ...file, score });
   }
 

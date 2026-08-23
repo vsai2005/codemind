@@ -1320,7 +1320,11 @@ async function loadRepositoryFiles(params: {
         // spends a request and a large share of the budget to tell the model nothing.
         NOT: { language: null },
       },
-      select: { path: true, size: true, language: true },
+      // symbols is what lets a question about behaviour — "how does it decide whether
+      // a value is a plain object" — reach the file that implements it. Omitting it
+      // here would silently leave scoring path-only in production while every unit
+      // test still passed, because the tests supply symbols directly.
+      select: { path: true, size: true, language: true, symbols: true },
       take: REPOSITORY_SELECTION_SCAN_LIMIT,
     });
 
