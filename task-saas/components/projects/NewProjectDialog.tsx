@@ -28,7 +28,11 @@ interface NewProjectDialogProps {
   open: boolean;
   /** Called for every dismissal: Cancel, Escape, backdrop, and after a success. */
   onClose: () => void;
-  /** Fires once, with the created project, immediately before `onClose`. */
+  /**
+   * Fires once, with the created project, immediately before `onClose` — including
+   * when a repo failed to index: the dialog shows that warning first, and this fires
+   * only once the user dismisses it, not when the project itself was created.
+   */
   onCreated: (project: { id: string; name: string }) => void;
 }
 
@@ -40,10 +44,12 @@ interface CreatedProject {
 interface FieldErrors {
   name?: string;
   description?: string;
+  repoUrl?: string;
 }
 
 const MAX_NAME_LENGTH = 120;
 const MAX_DESCRIPTION_LENGTH = 2000;
+const MAX_REPO_URL_LENGTH = 500;
 
 const FOCUSABLE_SELECTOR = [
   "a[href]",
@@ -92,9 +98,16 @@ export function NewProjectDialog({
 }: NewProjectDialogProps): React.ReactElement | null {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [repoUrl, setRepoUrl] = useState("");
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  /** Set once the project itself exists but its repo could not be attached. */
+  const [createdWithRepoWarning, setCreatedWithRepoWarning] = useState<{
+    project: CreatedProject;
+    warning: string;
+  } | null>(null);
+  const [indexingRepo, setIndexingRepo] = useState(false);
 
   const dialogRef = useRef<HTMLDivElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
@@ -108,24 +121,43 @@ export function NewProjectDialog({
   const titleId = `${baseId}-title`;
   const nameId = `${baseId}-name`;
   const descriptionId = `${baseId}-description`;
+  const repoUrlId = `${baseId}-repo-url`;
   const nameErrorId = `${nameId}-error`;
   const descriptionErrorId = `${descriptionId}-error`;
   const descriptionHintId = `${descriptionId}-hint`;
+  const repoUrlErrorId = `${repoUrlId}-error`;
+  const repoUrlHintId = `${repoUrlId}-hint`;
 
   const resetFields = useCallback(() => {
     setName("");
     setDescription("");
+    setRepoUrl("");
     setFieldErrors({});
     setFormError(null);
+    setCreatedWithRepoWarning(null);
   }, []);
 
-  /** Every dismissal path funnels through here so nothing outlives the dialog. */
+  /**
+   * Every dismissal path funnels through here so nothing outlives the dialog.
+   *
+   * `onCreated` is deliberately called from HERE, not from the repo-indexing branch in
+   * onSubmit, whenever a repo warning is showing. Sidebar's onCreated navigates
+   * (router.push), and Sidebar mounts a fresh NewProjectDialog per page rather than
+   * sharing one across a layout — so navigating before this point would unmount the
+   * dialog mid-index and the warning below would never be seen. Deferring the callback
+   * to the moment the user actually dismisses the warning keeps it on screen until then.
+   */
   const requestClose = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
     setSubmitting(false);
+    setIndexingRepo(false);
+    if (createdWithRepoWarning) {
+      onCreated(createdWithRepoWarning.project);
+      resetFields();
+    }
     onClose();
-  }, [onClose]);
+  }, [createdWithRepoWarning, onClose, onCreated, resetFields]);
 
   // --- Focus: enter on open, restore on close ----------------------------
   useEffect(() => {
@@ -137,6 +169,8 @@ export function NewProjectDialog({
     // A stale banner from a previous attempt must not greet the next one.
     setFormError(null);
     setFieldErrors({});
+    setCreatedWithRepoWarning(null);
+    setIndexingRepo(false);
 
     const frame = window.requestAnimationFrame(() => nameInputRef.current?.focus());
 
@@ -210,9 +244,12 @@ export function NewProjectDialog({
     if (description.length > MAX_DESCRIPTION_LENGTH) {
       errors.description = `Descriptions are limited to ${MAX_DESCRIPTION_LENGTH} characters.`;
     }
+    if (repoUrl.trim().length > MAX_REPO_URL_LENGTH) {
+      errors.repoUrl = `Repository URLs are limited to ${MAX_REPO_URL_LENGTH} characters.`;
+    }
 
     return errors;
-  }, [description, name]);
+  }, [description, name, repoUrl]);
 
   const onSubmit = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -259,9 +296,52 @@ export function NewProjectDialog({
         return;
       }
 
-      resetFields();
-      onCreated(created);
-      onClose();
+      const trimmedRepoUrl = repoUrl.trim();
+      if (trimmedRepoUrl.length === 0) {
+        resetFields();
+        onCreated(created);
+        onClose();
+        return;
+      }
+
+      setIndexingRepo(true);
+      try {
+        const repoRes = await fetch("/api/repositories", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: trimmedRepoUrl, projectId: created.id }),
+          signal: controller.signal,
+        });
+        const repoPayload: unknown = await repoRes.json().catch(() => null);
+
+        if (!repoRes.ok) {
+          // onCreated is deliberately NOT called here — see the comment on
+          // requestClose for why it must wait until the user dismisses this warning.
+          setIndexingRepo(false);
+          setCreatedWithRepoWarning({
+            project: created,
+            warning: readErrorMessage(
+              repoPayload,
+              "Could not index that repository. Try again shortly."
+            ),
+          });
+          return;
+        }
+
+        resetFields();
+        onCreated(created);
+        onClose();
+      } catch (repoError) {
+        // An abort here means the dialog was closed while indexing was in flight. The
+        // project was created but the parent was never told — an acceptable gap for a
+        // user-initiated cancellation, versus losing the warning below for every bad URL.
+        if (repoError instanceof DOMException && repoError.name === "AbortError") return;
+        setIndexingRepo(false);
+        setCreatedWithRepoWarning({
+          project: created,
+          warning: "Could not reach the server to index the repository.",
+        });
+      }
     } catch (error) {
       // An abort is a dismissal, not a failure — the dialog is already gone.
       if (error instanceof DOMException && error.name === "AbortError") return;
@@ -300,10 +380,12 @@ export function NewProjectDialog({
         <div className="mb-4 flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h2 id={titleId} className="text-base font-semibold text-gray-900">
-              New project
+              {createdWithRepoWarning ? "Project created" : "New project"}
             </h2>
             <p className="mt-1 text-[13px] text-gray-500">
-              Group related conversations, files, and instructions together.
+              {createdWithRepoWarning
+                ? `"${createdWithRepoWarning.project.name}" is ready to use.`
+                : "Group related conversations, files, and instructions together."}
             </p>
           </div>
           <button
@@ -329,6 +411,27 @@ export function NewProjectDialog({
           </button>
         </div>
 
+        {createdWithRepoWarning ? (
+          <div className="space-y-4">
+            <div
+              role="alert"
+              className="rounded-[6px] border border-amber-200 bg-amber-50 p-3 text-sm font-medium text-amber-900"
+            >
+              The project was created, but its repository could not be indexed:{" "}
+              {createdWithRepoWarning.warning}
+            </div>
+            <div className="flex justify-end pt-1">
+              <button
+                type="button"
+                onClick={requestClose}
+                className="inline-flex items-center justify-center rounded-[6px] bg-gray-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
         {formError && (
           <div
             role="alert"
@@ -398,6 +501,39 @@ export function NewProjectDialog({
             )}
           </div>
 
+          <div className="space-y-1.5">
+            <div className="flex items-baseline justify-between gap-2">
+              <label htmlFor={repoUrlId} className="block text-sm font-medium text-gray-700">
+                GitHub repository
+              </label>
+              <span className="shrink-0 text-[11px] text-gray-400">Optional</span>
+            </div>
+            <input
+              id={repoUrlId}
+              name="repoUrl"
+              type="text"
+              inputMode="url"
+              autoComplete="off"
+              value={repoUrl}
+              onChange={(e) => setRepoUrl(e.target.value)}
+              disabled={submitting}
+              placeholder="https://github.com/owner/repository"
+              aria-invalid={fieldErrors.repoUrl ? true : undefined}
+              aria-describedby={fieldErrors.repoUrl ? repoUrlErrorId : repoUrlHintId}
+              className={inputClass(Boolean(fieldErrors.repoUrl))}
+            />
+            {fieldErrors.repoUrl ? (
+              <p id={repoUrlErrorId} className="text-xs text-red-600">
+                {fieldErrors.repoUrl}
+              </p>
+            ) : (
+              <p id={repoUrlHintId} className="text-xs text-gray-400">
+                A public repository. CodeMind indexes it once and reads files from it as
+                this project&apos;s conversations need them.
+              </p>
+            )}
+          </div>
+
           <div className="flex flex-col-reverse gap-2 pt-1 sm:flex-row sm:justify-end">
             <button
               type="button"
@@ -417,10 +553,12 @@ export function NewProjectDialog({
                   className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
                 />
               )}
-              {submitting ? "Creating..." : "Create Project"}
+              {indexingRepo ? "Indexing repository..." : submitting ? "Creating..." : "Create Project"}
             </button>
           </div>
         </form>
+          </>
+        )}
       </div>
     </div>
   );
