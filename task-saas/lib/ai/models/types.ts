@@ -44,6 +44,13 @@ export interface ModelDescriptor {
   strengths: string[];
   /** Operator switch: a disabled entry is never listed and never resolvable. */
   enabled: boolean;
+  /**
+   * Listed but not yet selectable, regardless of credentials. Unlike `enabled: false`
+   * (which hides the model entirely), this keeps the name visible with a "Coming soon"
+   * badge so users know the capability is planned. Enforced both client-side (picker
+   * disables the row) and server-side (`resolveModel` rejects the id).
+   */
+  comingSoon?: boolean;
 }
 
 /** Client-safe. Never carries credentials or base URLs. */
@@ -53,8 +60,10 @@ export interface ClientModelInfo {
   providerLabel: string;
   strengths: string[];
   supportsVision: boolean;
-  /** False when the provider key is not configured in this environment. */
+  /** False when the provider key is not configured, or the model is `comingSoon`. */
   available: boolean;
+  /** True for a model that is listed but not yet selectable. See ModelDescriptor. */
+  comingSoon: boolean;
 }
 
 /**

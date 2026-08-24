@@ -26,6 +26,7 @@ export interface ClientModelInfo {
   strengths: string[];
   supportsVision: boolean;
   available: boolean;
+  comingSoon: boolean;
 }
 
 interface ModelsResponse {
@@ -66,6 +67,7 @@ function parseModelsResponse(body: unknown): ModelsResponse | null {
         : [],
       supportsVision: candidate.supportsVision === true,
       available: candidate.available !== false,
+      comingSoon: candidate.comingSoon === true,
     });
   }
 
@@ -354,7 +356,7 @@ export function ModelSelector({ value, onChange, disabled }: ModelSelectorProps)
                     </span>
                     {!model.available && (
                       <span className="shrink-0 rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                        Unavailable
+                        {model.comingSoon ? "Coming soon" : "Unavailable"}
                       </span>
                     )}
                   </span>

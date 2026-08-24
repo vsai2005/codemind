@@ -112,6 +112,11 @@ function buildRegistry(): ModelDescriptor[] {
       supportsVision: false,
       strengths: ["Long Context", "Coding", "Reasoning"],
       enabled: true,
+      // Provider health has been unreliable — see the DeepSeek project memory notes
+      // (52-102s to first header on 2026-08-22, then hanging with zero response on
+      // 2026-08-24 while Nemotron on the same NVIDIA host stayed responsive). Listed
+      // so users know it's coming, but not selectable until that's resolved.
+      comingSoon: true,
     },
   ];
 }
@@ -153,7 +158,9 @@ export function listModelsForClient(): ClientModelInfo[] {
     providerLabel: descriptor.providerLabel,
     strengths: descriptor.strengths,
     supportsVision: descriptor.supportsVision,
-    available: getProviderAdapter(descriptor.provider).isConfigured(),
+    available:
+      !descriptor.comingSoon && getProviderAdapter(descriptor.provider).isConfigured(),
+    comingSoon: descriptor.comingSoon ?? false,
   }));
 }
 
@@ -162,10 +169,10 @@ export function getModelDescriptor(id: string): ModelDescriptor | null {
   return registry().find((descriptor) => descriptor.id === id) ?? null;
 }
 
-/** Registered AND enabled AND its provider has credentials. All three must hold. */
+/** Registered AND enabled AND not comingSoon AND its provider has credentials. */
 export function isModelAvailable(id: string): boolean {
   const descriptor = getModelDescriptor(id);
-  if (!descriptor || !descriptor.enabled) return false;
+  if (!descriptor || !descriptor.enabled || descriptor.comingSoon) return false;
   return getProviderAdapter(descriptor.provider).isConfigured();
 }
 
@@ -179,8 +186,8 @@ export function isModelAvailable(id: string): boolean {
  */
 export function getDefaultModelId(): string {
   const models = listModels();
-  const available = models.find((descriptor) =>
-    getProviderAdapter(descriptor.provider).isConfigured()
+  const available = models.find(
+    (descriptor) => !descriptor.comingSoon && getProviderAdapter(descriptor.provider).isConfigured()
   );
   if (available) return available.id;
 
@@ -205,6 +212,10 @@ export function resolveModel(id: string): ResolvedModel {
 
   if (!descriptor.enabled) {
     throw new Error(`Model is disabled: ${id}`);
+  }
+
+  if (descriptor.comingSoon) {
+    throw new Error(`Model is not yet available: ${id}`);
   }
 
   const adapter = getProviderAdapter(descriptor.provider);
