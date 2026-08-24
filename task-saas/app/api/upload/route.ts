@@ -9,8 +9,8 @@ import { enforceRateLimit } from "@/lib/rate-limit";
 import { logger } from "@/lib/logger";
 import { enforceBodyLimit } from "@/lib/http/body-limit";
 
-// pdf-parse is CommonJS with no usable ESM default export in this setup.
-const pdfParse = require("pdf-parse");
+// pdf-parse v2 dropped the old callable-function export in favor of a PDFParse class.
+const { PDFParse } = require("pdf-parse");
 
 /** Upper bound for any upload, including documents. */
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -28,10 +28,6 @@ const TEXT_FILE_EXTENSIONS =
 const PDF_PARSE_TIMEOUT_MS = 15_000;
 const PDF_MAX_PAGES = 500;
 
-interface PdfParseResult {
-  text: unknown;
-}
-
 /**
  * Parse a PDF, giving up after PDF_PARSE_TIMEOUT_MS.
  *
@@ -42,6 +38,7 @@ interface PdfParseResult {
  */
 async function parsePdfWithTimeout(buffer: Buffer): Promise<string | null> {
   let timer: NodeJS.Timeout | undefined;
+  const parser = new PDFParse({ data: buffer });
 
   const timeout = new Promise<null>((resolve) => {
     timer = setTimeout(() => resolve(null), PDF_PARSE_TIMEOUT_MS);
@@ -49,13 +46,14 @@ async function parsePdfWithTimeout(buffer: Buffer): Promise<string | null> {
 
   try {
     const parsed = await Promise.race([
-      pdfParse(buffer, { max: PDF_MAX_PAGES }) as Promise<PdfParseResult>,
+      parser.getText({ first: PDF_MAX_PAGES }),
       timeout,
     ]);
     if (parsed === null) return null;
     return typeof parsed.text === "string" ? parsed.text : "";
   } finally {
     if (timer) clearTimeout(timer);
+    await parser.destroy();
   }
 }
 

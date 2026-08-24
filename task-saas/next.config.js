@@ -22,8 +22,12 @@ const nextConfig = {
      * Marking it external leaves it in node_modules, where its data files still sit
      * beside it. Next's output tracing then copies the whole package into the
      * standalone build, so this works in Docker as well as in dev.
+     *
+     * pdf-parse (via pdfjs-dist) has the same problem: it loads pdf.worker.mjs from
+     * disk relative to its own package, and bundling strips that sibling file, failing
+     * with "Setting up fake worker failed: Cannot find module './pdf.worker.mjs'".
      */
-    serverComponentsExternalPackages: ["pdfkit"],
+    serverComponentsExternalPackages: ["pdfkit", "pdf-parse", "pdfjs-dist"],
   },
 };
 
