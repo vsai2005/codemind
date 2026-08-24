@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ChatError } from "./ChatError";
 
 /**
  * Chat composer.
@@ -49,6 +50,17 @@ export function Composer({
 }: ComposerProps): React.ReactElement {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [uploading, setUploading] = useState(false);
+  /**
+   * The most recent upload failure, and the file it was for.
+   *
+   * `alert()` used to swallow the real reason regardless of cause — a 10MB image and a
+   * PDF that timed out both surfaced as the same "Failed to upload file", the same
+   * class of silent failure fixed server-side in loadRepositoryFiles. `failedUploadFile`
+   * exists so "Retry" can re-attempt the SAME upload rather than only reopening the
+   * picker, matching what "Retry" already means on the chat-send banner.
+   */
+  const [uploadError, setUploadError] = useState<Error | null>(null);
+  const [failedUploadFile, setFailedUploadFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
@@ -85,11 +97,14 @@ export function Composer({
     return () => window.removeEventListener("resize", resize);
   }, [resize]);
 
-  const onFileSelect = async (e: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
-    if (!e.target.files?.length) return;
-
+  /**
+   * Upload one file, sharing the same success/failure handling for a fresh selection
+   * and a retry so the two paths cannot drift apart.
+   */
+  const uploadFile = useCallback(async (file: File): Promise<void> => {
     setUploading(true);
-    const file = e.target.files[0];
+    setUploadError(null);
+
     const formData = new FormData();
     formData.append("file", file);
 
@@ -98,16 +113,37 @@ export function Composer({
       if (res.ok) {
         const data = await res.json();
         setAttachments((prev) => [...prev, { ...data, id: Math.random().toString() }]);
+        setFailedUploadFile(null);
       } else {
-        alert("Failed to upload file");
+        // The upload route always answers a failure as {"error": "..."} JSON, the same
+        // shape the chat route uses. Passed through unparsed so describeChatError —
+        // already written to pull a human sentence out of exactly this shape — handles
+        // it, rather than a second parser that could read the same body differently.
+        const text = await res.text();
+        setUploadError(new Error(text));
+        setFailedUploadFile(file);
       }
     } catch {
-      alert("Error processing upload");
+      setUploadError(new Error("Could not reach the server. Check your connection and try again."));
+      setFailedUploadFile(file);
     } finally {
       setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
     }
+  }, []);
+
+  const onFileSelect = async (e: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
+    if (!e.target.files?.length) return;
+    const file = e.target.files[0];
+    // Reset immediately, not in `finally`: the browser will not fire onChange again for
+    // an identical File selection while the input still holds it, which would silently
+    // block re-choosing the same file after a failure.
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    await uploadFile(file);
   };
+
+  const retryUpload = useCallback((): void => {
+    if (failedUploadFile) void uploadFile(failedUploadFile);
+  }, [failedUploadFile, uploadFile]);
 
   const removeAttachment = (id: string): void => {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
@@ -133,6 +169,17 @@ export function Composer({
 
   return (
     <div className="mx-auto w-full max-w-3xl">
+      {uploadError && (
+        <div className="mb-2">
+          <ChatError
+            error={uploadError}
+            onRetry={retryUpload}
+            disabled={uploading}
+            hint="The file was not attached. Retry, or choose a different one."
+          />
+        </div>
+      )}
+
       <form
         ref={formRef}
         onSubmit={onSubmit}

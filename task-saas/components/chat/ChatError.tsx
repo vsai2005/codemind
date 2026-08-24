@@ -45,13 +45,24 @@ export function describeChatError(error: Error): string {
 
 interface ChatErrorProps {
   error: Error;
-  /** Resends the message that failed. */
+  /** Resends whatever failed. */
   onRetry: () => void;
   /** True while another generation is running, so retry cannot stack requests. */
   disabled?: boolean;
+  /**
+   * Reassurance line under the message. Defaults to the chat-send wording; a caller
+   * reusing this banner for a different failure (upload, for instance) should say what
+   * was actually preserved instead — "your message" is wrong when nothing was sent.
+   */
+  hint?: string;
 }
 
-export function ChatError({ error, onRetry, disabled = false }: ChatErrorProps): React.ReactElement {
+export function ChatError({
+  error,
+  onRetry,
+  disabled = false,
+  hint = "Your message was not lost — it is back in the box below.",
+}: ChatErrorProps): React.ReactElement {
   return (
     <div
       role="alert"
@@ -72,9 +83,7 @@ export function ChatError({ error, onRetry, disabled = false }: ChatErrorProps):
 
       <div className="min-w-0 flex-1">
         <p className="text-[13px] leading-relaxed text-red-900">{describeChatError(error)}</p>
-        <p className="mt-1 text-[12px] text-red-700">
-          Your message was not lost — it is back in the box below.
-        </p>
+        <p className="mt-1 text-[12px] text-red-700">{hint}</p>
       </div>
 
       <button
