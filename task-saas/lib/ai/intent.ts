@@ -146,3 +146,44 @@ export function detectArtifactIntent(rawText: unknown): ArtifactIntent | null {
 
   return null;
 }
+
+/**
+ * Does this message mention files or downloads AT ALL — deliberately loose.
+ *
+ * WHY THIS IS NOT `detectArtifactIntent`
+ *
+ * These two answer opposite questions and must not be confused. `detectArtifactIntent`
+ * asks "should the artifact pipeline handle this instead of the chat model?", and a
+ * non-null answer means the chat model is never called. So on the chat path it is
+ * ALWAYS null — gating anything about chat on it would gate on a constant.
+ *
+ * This asks the question that actually matters for the chat prompt: "might this user
+ * be thinking about a file, even though the router declined to build one?" That is
+ * precisely the population the download guardrails exist for. The documented incidents
+ * all came from messages that landed HERE, not in the pipeline:
+ *
+ *   - "make me a pdf" scored as chat, and the model invented a tool call
+ *   - an image attachment forces `intent = null` in the route regardless of wording,
+ *     so "turn this into a PDF" with a screenshot attached reaches the chat model
+ *
+ * DELIBERATELY OVER-INCLUSIVE. The costs are asymmetric: a false positive spends ~194
+ * tokens on guardrails that were not needed, while a false negative removes the only
+ * thing standing between the user and a failure mode that has already regressed twice.
+ * When in doubt this returns true, and callers should treat `false` as the exceptional
+ * case rather than the default.
+ */
+export function mentionsFileDelivery(rawText: unknown): boolean {
+  if (typeof rawText !== "string") return true; // unreadable input: assume it might
+  const text = normalizeForIntent(rawText);
+  if (text.trim().length === 0) return false; // genuinely nothing to be about
+
+  return (
+    DELIVERY.test(text) ||
+    ZIP_NOUN.test(text) ||
+    PDF_NOUN.test(text) ||
+    PROJECT_NOUN.test(text) ||
+    MULTI_FILE.test(text) ||
+    SCRIPT_NOUN.test(text) ||
+    FILENAME_REF.test(text)
+  );
+}

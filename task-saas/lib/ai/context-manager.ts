@@ -2,6 +2,7 @@ import { Message } from "ai";
 import { ATTACHMENT_TAG_RE } from "@/lib/attachments";
 import { getContextTokenLimit, getOutputTokenLimit } from "@/lib/env";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
+import { mentionsFileDelivery } from "@/lib/ai/intent";
 
 /**
  * Context Management V3
@@ -17,16 +18,20 @@ import { buildSystemPrompt } from "@/lib/ai/system-prompt";
  */
 
 /**
- * Flat reserve for the static persona layers (identity + capabilities + guardrails),
- * built by buildSystemPrompt in lib/ai/system-prompt.ts.
+ * Flat reserve for the static persona layers, built by buildSystemPrompt in
+ * lib/ai/system-prompt.ts.
  *
- * Measured, not guessed: those three layers assemble to ~1,500 characters / ~377
- * estimated tokens. 400 leaves room to reword without silently under-reserving,
- * which would show up as an occasional context overflow rather than an obvious
- * error. It is mirrored there as STATIC_PROMPT_TOKEN_BUDGET, where per-layer
- * ceilings pin down which layer grew; keep the two numbers in step.
+ * Sized for the WORST case rather than the typical one, because this is subtracted
+ * before anything about the turn is known. Two of those layers are now conditional, so
+ * the range is wide: a plain chat turn assembles ~191 tokens, while a repo-backed
+ * request that also mentions a file reaches ~494. The reserve has to cover the top of
+ * that range; requests below it simply leave the difference to the conversation
+ * budget, which is the direction that cannot break anything.
+ *
+ * Mirrored as STATIC_PROMPT_TOKEN_BUDGET, where per-layer ceilings pin down which
+ * layer grew. Keep the two numbers in step.
  */
-const SYSTEM_PROMPT_RESERVE = 400;
+const SYSTEM_PROMPT_RESERVE = 520;
 
 /**
  * Held back so an estimator miss cannot push the request past the provider ceiling.
@@ -717,7 +722,24 @@ ${file.content}`;
     // they outrank anything the assembled context happens to say. That layer encodes
     // three production failure modes and is documented at length there; this function
     // only supplies the task-context layer it budgeted above.
-    const systemPrompt = buildSystemPrompt({ contextBlocks });
+    //
+    // Two conditional layers, decided from what this turn actually has:
+    //
+    //   grounding      only when repository files survived budgeting. Checked against
+    //                  the RENDERED block, not options.repositoryFiles — a file list
+    //                  that was passed in but priced out leaves nothing for the model
+    //                  to cite, and grounding rules pointing at an absent block are
+    //                  the confusing case they are meant to prevent.
+    //   artifact rules dropped only when the user's own words show no sign of wanting
+    //                  a file. mentionsFileDelivery is over-inclusive on purpose; see
+    //                  the note there. This is the ONLY place that may pass false.
+    const hasRepositoryContext = contextBlocks.includes("--- REPOSITORY FILES ---");
+
+    const systemPrompt = buildSystemPrompt({
+      contextBlocks,
+      hasRepositoryContext,
+      includeArtifactRules: mentionsFileDelivery(queryStr),
+    });
 
     const used = totalBudget - budget;
     const ratio = totalBudget > 0 ? used / totalBudget : 1;

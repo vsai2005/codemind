@@ -93,8 +93,11 @@ describe("ContextManager.buildContext", () => {
     it("drops whole USER→ASSISTANT turns, never an orphaned half", () => {
       // Sized so the older turn cannot fit but the newer one can. Tracks
       // SYSTEM_PROMPT_RESERVE: the window must clear reserve + output + margin
-      // before any history fits at all.
-      process.env.AI_CONTEXT_MAX_TOKENS = "620";
+      // before any history fits at all — so this figure moves with the reserve
+      // (740 = the old 620 plus the 400->520 increase when the rule layers
+      // became conditional), keeping the effective budget the scenario sees
+      // unchanged.
+      process.env.AI_CONTEXT_MAX_TOKENS = "740";
       process.env.AI_MAX_OUTPUT_TOKENS = "100";
 
       const historical = [
@@ -118,7 +121,7 @@ describe("ContextManager.buildContext", () => {
 
     it("keeps the retained window contiguous", () => {
       // Sized so the huge middle turn cannot fit, stranding everything older.
-      process.env.AI_CONTEXT_MAX_TOKENS = "620";
+      process.env.AI_CONTEXT_MAX_TOKENS = "740";
       process.env.AI_MAX_OUTPUT_TOKENS = "100";
 
       const historical = [
@@ -379,10 +382,10 @@ describe("ContextManager.buildContext", () => {
      * configured context limit.
      */
     it("does not exceed the budget when the current message has consumed it", () => {
-      process.env.AI_CONTEXT_MAX_TOKENS = "4000";
+      process.env.AI_CONTEXT_MAX_TOKENS = "4120";
       process.env.AI_MAX_OUTPUT_TOKENS = "200";
 
-      // Sized so the message fits (≈3,367 of a ≈3,420-token budget) but leaves LESS
+      // Sized so the message fits (≈3,234 of a ≈3,317-token budget) but leaves LESS
       // than the 5% ratio cap. That is the shape that broke: a remainder smaller than
       // the share each block was allowed to claim. A message that merely fits with room
       // to spare would pass under the old logic too and prove nothing.

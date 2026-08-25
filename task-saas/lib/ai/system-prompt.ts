@@ -5,17 +5,25 @@ import { logger } from "@/lib/logger";
  * System prompt composition.
  *
  * The conversational persona used to be a single hand-written template literal in
- * context-manager.ts. It is split here into four layers, assembled in a fixed order:
+ * context-manager.ts. It is split here into layers, assembled in a fixed order:
  *
- *   1. IDENTITY      static persona. Rarely changes.
- *   2. CAPABILITIES  rendered from a CapabilityProfile, never hand-written prose.
- *   3. TASK CONTEXT  whatever ContextManager assembled for this turn.
- *   4. GUARDRAILS    static, last, highest priority.
+ *   1.  IDENTITY          static persona. Rarely changes.        always
+ *   2.  CAPABILITIES      rendered from a CapabilityProfile.     always
+ *   3.  TASK CONTEXT      whatever ContextManager assembled.     when non-empty
+ *   3b. REPO GROUNDING    how to use the files above.            only with a repo
+ *   4a. OUTPUT CONTRACT   the tool-call prohibition.             always
+ *   4b. ARTIFACT RULES    download promises and markup.          unless no file hint
  *
- * Later layers win on conflict, which is why GUARDRAILS is last: an instruction at
- * the end of a system prompt is weighted more reliably than one buried mid-prompt.
- * This is a deliberate change from the pre-refactor order, where the persona — and
- * so the guardrails — preceded the assembled context.
+ * Later layers win on conflict, which is why every RULE layer sits after the task
+ * context: an instruction at the end of a system prompt is weighted more reliably than
+ * one buried mid-prompt. This is a deliberate change from the pre-refactor order,
+ * where the persona — and so the guardrails — preceded the assembled context.
+ *
+ * WHY TWO OF THEM ARE CONDITIONAL
+ * Every turn used to pay all of it: 377 tokens, including 194 of artifact and download
+ * rules on questions that mentioned no file at all. Splitting the trailing block means
+ * a plain chat turn now assembles 203. The two conditions default in OPPOSITE
+ * directions, and that asymmetry is the safety property — see BuildSystemPromptOptions.
  *
  * The guardrail wording is load-bearing. Three failure modes are encoded in it, each
  * produced by fixing the previous one, and the prompt has to hold all three at once:
@@ -99,14 +107,34 @@ export const LAYER_TOKEN_BUDGETS = {
   identity: 55,
   capabilities: 95,
   guardrails: 330,
+  /** Repository grounding. Only paid when source files are attached. */
+  grounding: 130,
+  /** The tool-call prohibition. Unconditional, so this is the floor for every turn. */
+  outputContract: 130,
+  /** Artifact and download rules. Dropped when the user mentions no file at all. */
+  artifactRules: 230,
 } as const;
 
 /**
- * Ceiling on layers 1 + 2 + 4 assembled, which is the figure that has to fit the
- * SYSTEM_PROMPT_RESERVE that context-manager subtracts from the window. Layer 3 is
- * charged against the conversation budget instead. Currently measures 377.
+ * Ceiling on the static (non-context) layers assembled, which is the figure that has
+ * to fit the SYSTEM_PROMPT_RESERVE that context-manager subtracts from the window.
+ * The task-context layer is charged against the conversation budget instead.
+ *
+ * This must cover the WORST case, not the common one. Since the rule layers became
+ * conditional the spread is wide — measured: 203 for a plain chat turn, 318 with a
+ * repository attached, 380 when a file is mentioned, and 494 for a repo-backed request
+ * that also mentions a file. The reserve is a single constant subtracted before
+ * anything about the turn is known, so it is sized to that 494 worst case with ~5%
+ * headroom for rewording.
+ *
+ * NOT sized to absorb the additive-accounting drift between this reserve and the
+ * conversation budget (measured up to +225 tokens on a large dense-code context).
+ * That drift is proportional to context size rather than constant, so a bigger fixed
+ * reserve would overcharge every small request and still not cover a large one; it is
+ * absorbed by SAFETY_MARGIN_RATIO instead. See the drift test in
+ * __tests__/lib/system-prompt.test.ts.
  */
-export const STATIC_PROMPT_TOKEN_BUDGET = 400;
+export const STATIC_PROMPT_TOKEN_BUDGET = 520;
 
 export type PromptLayerName = keyof typeof LAYER_TOKEN_BUDGETS;
 
@@ -166,17 +194,72 @@ export function renderTaskContext(contextBlocks: string, planBlock?: string | nu
   return [contextBlocks ?? "", planBlock ?? ""].filter((part) => part.trim().length > 0).join("");
 }
 
-/** Layer 4. Static, last, highest priority. See the failure modes above. */
-export function renderGuardrails(): string {
+/**
+ * Layer 3b. Repository grounding — included ONLY when source files were attached.
+ *
+ * CodeMind's product promise is answering from the repository it was given. Nothing
+ * enforced that: chat-output-guard.ts is scoped to bare tool-call syntax and
+ * deliberately declines to pattern-match prose, so a confidently invented function
+ * name reached the user unchallenged.
+ *
+ * Conditional because the rules are meaningless without a REPOSITORY FILES block to
+ * refer to — and worse than meaningless, since telling a model to "cite only the files
+ * above" when there are none invites it to explain that it has no files rather than
+ * answer the question it was actually asked.
+ *
+ * The "name what you would need" instruction is chosen for a second reason: it is the
+ * exact input an adaptive context-expansion loop would consume. Building that loop
+ * later needs no prompt change, only a reader for output this already produces.
+ */
+export function renderRepositoryGrounding(): string {
+  return `The repository files above are all you can see of it. The repository is larger; the rest was not retrieved.
+
+Cite a path only if it appears above. Never describe a file's contents unless they were shown, and never say you opened, read or searched anything.
+
+If answering needs code you were not given, say "that is not in the provided context" and name the file or symbol you would need. A precise gap is useful; a confident guess about unseen code is not.`;
+}
+
+/**
+ * Layer 4a. The output contract. ALWAYS included — this one is unconditional.
+ *
+ * The tool-call prohibition cannot be made conditional on anything: the model invented
+ * a tool during an ordinary request, so there is no signal that would have predicted
+ * it. chat-output-guard.ts is the deterministic backstop, but it only fires AFTER
+ * generation — by then the output budget is already spent and the user gets a notice
+ * instead of an answer. This rule is what prevents the waste; the guard only contains
+ * it.
+ */
+export function renderOutputContract(): string {
   return `Never emit tool-call or function-call syntax of any kind — not a JSON object such as {"tool": ...} or {"name": ..., "arguments": ...}, not XML tool tags, not a fenced block written as though it invokes something. Nothing is listening for it, so it produces no result and wastes the reply.
 
-Never emit the artifact pipeline's markup: no <codemind_artifact>, no <file path="...">. Two rules follow, and both matter:
+Answer the question and put code in fenced Markdown blocks with a language tag.`;
+}
+
+/**
+ * Layer 4b. Artifact and download rules — included when the user might be thinking
+ * about a file. See the three failure modes in the module header.
+ *
+ * Conditional, but FAIL-SAFE: `buildSystemPrompt` includes this unless a caller
+ * explicitly says not to. The signal is `mentionsFileDelivery`, which is deliberately
+ * over-inclusive — see the note there on why a false negative here is far more
+ * expensive than a false positive.
+ */
+export function renderArtifactRules(): string {
+  return `Never emit the artifact pipeline's markup: no <codemind_artifact>, no <file path="...">. Two rules follow, and both matter:
 
 Never say a download cannot be created. It can, and saying otherwise is simply wrong.
 
 Never say a download is being created, is on its way, is being packaged, or will arrive shortly. If you are writing this reply, that pipeline already decided this was not a download request and is not running. No file is coming. Promising one that never appears is worse than not mentioning it.
 
-So: answer the question and put the content in fenced Markdown blocks. If the user seems to want a file, close with one short line inviting them to ask again explicitly — for example "give me this as a PDF" — because that next message is what routes to the pipeline.`;
+If the user seems to want a file, close with one short line inviting them to ask again explicitly — for example "give me this as a PDF" — because that next message is what routes to the pipeline.`;
+}
+
+/**
+ * Both trailing rule layers, in order. Retained under the original name so existing
+ * callers and tests that reason about "the guardrails" as one block keep working.
+ */
+export function renderGuardrails(): string {
+  return `${renderOutputContract()}\n\n${renderArtifactRules()}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,9 +273,34 @@ export interface BuildSystemPromptOptions {
   planBlock?: string | null;
   /** Layer 2 input. Defaults to the live profile. */
   capabilities?: CapabilityProfile;
+  /**
+   * Include the repository grounding layer. Defaults to FALSE.
+   *
+   * Off by default because the rules reference a REPOSITORY FILES block that is
+   * usually absent, and instructions about files the model does not have are worse
+   * than no instructions. There is no incident on this side of the default, so the
+   * safe direction is omission.
+   */
+  hasRepositoryContext?: boolean;
+  /**
+   * Include the artifact/download rules. Defaults to TRUE.
+   *
+   * The opposite default to the above, and deliberately so. Omitting these reproduces
+   * a failure mode that has already regressed twice, so a caller that forgets to pass
+   * anything must still get them. Only an explicit `false` — from a caller that has
+   * actually checked `mentionsFileDelivery` — drops them.
+   */
+  includeArtifactRules?: boolean;
 }
 
-/** The static layers on their own, so callers can measure them without a turn. */
+/**
+ * Every static layer on its own, so callers can measure each without running a turn.
+ *
+ * `guardrails` is the output contract and artifact rules concatenated — retained
+ * because it is the unit the pre-existing budget test and several callers reason
+ * about. The two halves are also returned separately, since only one of them is
+ * unconditional and a combined figure hides which half grew.
+ */
 export function buildStaticLayers(
   profile: CapabilityProfile = DEFAULT_CAPABILITY_PROFILE
 ): Record<PromptLayerName, string> {
@@ -200,6 +308,9 @@ export function buildStaticLayers(
     identity: renderIdentity(),
     capabilities: renderCapabilities(profile),
     guardrails: renderGuardrails(),
+    grounding: renderRepositoryGrounding(),
+    outputContract: renderOutputContract(),
+    artifactRules: renderArtifactRules(),
   };
 }
 
@@ -212,7 +323,20 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
   const layers = buildStaticLayers(profile);
   const taskContext = renderTaskContext(options.contextBlocks ?? "", options.planBlock);
 
-  const prompt = [layers.identity, layers.capabilities, taskContext, layers.guardrails]
+  // Note the asymmetric defaults — see BuildSystemPromptOptions for why each falls the
+  // way it does. Both rule layers stay AFTER the task context so they keep the
+  // end-of-prompt weighting the layering exists to buy.
+  const grounding = options.hasRepositoryContext === true ? renderRepositoryGrounding() : "";
+  const artifactRules = options.includeArtifactRules === false ? "" : renderArtifactRules();
+
+  const prompt = [
+    layers.identity,
+    layers.capabilities,
+    taskContext,
+    grounding,
+    renderOutputContract(),
+    artifactRules,
+  ]
     .map((layer) => layer.trim())
     .filter((layer) => layer.length > 0)
     .join("\n\n");
@@ -220,9 +344,14 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
   // The static layers growing past the reserve silently under-reserves the context
   // budget, which surfaces later as an occasional overflow rather than an obvious
   // error. Tests assert the ceilings; this catches an overrun that reaches runtime.
-  // Measured on the assembled static layers, matching how the reserve is spent.
+  //
+  // Measured on the layers ACTUALLY included this turn, not on every layer that
+  // exists: since the rule layers became conditional, a fixed measurement would warn
+  // about tokens a given request never paid for.
   const staticTokens = estimateTokens(
-    [layers.identity, layers.capabilities, layers.guardrails].join("\n\n")
+    [layers.identity, layers.capabilities, grounding, renderOutputContract(), artifactRules]
+      .filter((layer) => layer.trim().length > 0)
+      .join("\n\n")
   );
 
   if (staticTokens > STATIC_PROMPT_TOKEN_BUDGET) {
@@ -231,7 +360,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
       budget: STATIC_PROMPT_TOKEN_BUDGET,
       identity: estimateTokens(layers.identity),
       capabilities: estimateTokens(layers.capabilities),
-      guardrails: estimateTokens(layers.guardrails),
+      grounding: estimateTokens(grounding),
+      outputContract: estimateTokens(renderOutputContract()),
+      artifactRules: estimateTokens(artifactRules),
     });
   }
 

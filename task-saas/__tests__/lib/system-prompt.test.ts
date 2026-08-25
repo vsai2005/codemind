@@ -127,10 +127,27 @@ describe("buildSystemPrompt", () => {
       expect(estimateTokens(layers.guardrails)).toBeLessThanOrEqual(LAYER_TOKEN_BUDGETS.guardrails);
     });
 
+    it("keeps the grounding layer inside its budget", () => {
+      expect(estimateTokens(layers.grounding)).toBeLessThanOrEqual(LAYER_TOKEN_BUDGETS.grounding);
+    });
+
+    it("keeps the output contract inside its budget", () => {
+      // The floor every turn pays, so growth here is the most expensive kind.
+      expect(estimateTokens(layers.outputContract)).toBeLessThanOrEqual(
+        LAYER_TOKEN_BUDGETS.outputContract
+      );
+    });
+
+    it("keeps the artifact rules inside their budget", () => {
+      expect(estimateTokens(layers.artifactRules)).toBeLessThanOrEqual(
+        LAYER_TOKEN_BUDGETS.artifactRules
+      );
+    });
+
     it("keeps the assembled static layers inside the context-manager reserve", () => {
       // Must stay in step with SYSTEM_PROMPT_RESERVE in lib/ai/context-manager.ts.
       expect(estimateTokens(buildSystemPrompt())).toBeLessThanOrEqual(STATIC_PROMPT_TOKEN_BUDGET);
-      expect(STATIC_PROMPT_TOKEN_BUDGET).toBe(400);
+      expect(STATIC_PROMPT_TOKEN_BUDGET).toBe(520);
     });
   });
 
@@ -195,43 +212,103 @@ describe("buildSystemPrompt", () => {
     });
 
     /**
-     * Documents what is paid on EVERY request today, so conditional assembly can be
-     * shown to reduce it rather than merely claimed to.
+     * The fail-safe default, and the reason it falls this way.
      *
-     * A turn with no repository, no attachment and no file intent still carries the
-     * full artifact/download guardrail block — measured at 194 tokens, roughly half
-     * the entire static prompt. This assertion is expected to CHANGE when those rules
-     * become conditional; that change is the point, and it should be visible in a diff
-     * rather than silent.
+     * A caller that passes nothing must still get the artifact rules. Omitting them
+     * reproduces a failure mode that has already regressed twice, so the default has
+     * to be the safe one and only an explicit `false` may drop them.
      */
-    it("currently pays the artifact/download guardrails unconditionally", () => {
-      const bare = buildSystemPrompt(); // no context of any kind
+    it("includes the artifact rules unless a caller explicitly opts out", () => {
+      const bare = buildSystemPrompt(); // no options at all
       expect(bare).toContain("<codemind_artifact>");
       expect(bare).toMatch(/never say a download is being created/i);
-      expect(estimateTokens(bare)).toBeGreaterThan(300);
     });
   });
 
   /**
-   * The anti-hallucination contract the audit found MISSING.
+   * The anti-hallucination contract.
    *
-   * These are `todo` rather than failing assertions on purpose: there is nothing in
-   * the current prompt to lock in. Grep across the assembled prompt finds no rule
-   * about citing given paths, no "not in the provided context" instruction, and no
-   * prohibition on claiming to have read a file that was never supplied — the only
-   * match for "file path" is the `<file path="...">` artifact-markup ban, which is a
-   * different rule entirely.
-   *
-   * Repository grounding is CodeMind's core product promise, and it is currently
-   * enforced by nothing: not the prompt, and not chat-output-guard.ts (which is
-   * scoped to bare tool-call syntax and explicitly declines to pattern-match prose).
-   * Turning these into real assertions is the acceptance criterion for that work.
+   * Repository grounding is CodeMind's core product promise and was previously
+   * enforced by nothing — not the prompt, and not chat-output-guard.ts, which is
+   * scoped to bare tool-call syntax and explicitly declines to pattern-match prose.
+   * These were `todo` during the audit; they are the acceptance criteria for the work
+   * that added the layer.
    */
-  describe("repository grounding contract (not yet implemented)", () => {
-    it.todo("instructs the model to cite only file paths present in contextBlocks");
-    it.todo("instructs the model to say 'not in the provided context' rather than invent a symbol");
-    it.todo("forbids claiming to have read a file that was not supplied");
-    it.todo("includes the grounding block ONLY when repository files are attached");
-    it.todo("omits the grounding block entirely when no repository is attached");
+  describe("repository grounding contract", () => {
+    const grounded = () =>
+      buildSystemPrompt({
+        hasRepositoryContext: true,
+        contextBlocks: "\n\n--- REPOSITORY FILES ---\n=== src/a.ts ===\nexport const a = 1;",
+      });
+
+    it("instructs the model to cite only file paths present in contextBlocks", () => {
+      expect(grounded()).toMatch(/cite a path only if it appears above/i);
+    });
+
+    it("instructs the model to say 'not in the provided context' rather than invent a symbol", () => {
+      const prompt = grounded();
+      expect(prompt).toContain("that is not in the provided context");
+      // The escalation half: a named gap is what a future context-expansion loop reads.
+      expect(prompt).toMatch(/name the file or symbol you would need/i);
+    });
+
+    it("forbids claiming to have read a file that was not supplied", () => {
+      expect(grounded()).toMatch(/never say you opened, read or searched anything/i);
+    });
+
+    it("includes the grounding block ONLY when repository files are attached", () => {
+      expect(grounded()).toContain("not in the provided context");
+    });
+
+    it("omits the grounding block entirely when no repository is attached", () => {
+      // Grounding rules that point at an absent REPOSITORY FILES block invite the
+      // model to explain it has no files instead of answering the question asked.
+      const noRepo = buildSystemPrompt({ contextBlocks: "\n\n--- PROJECT MEMORY ---\nUses Prisma." });
+      expect(noRepo).not.toContain("not in the provided context");
+      expect(noRepo).not.toMatch(/cite a path only/i);
+    });
+
+    it("keeps the grounding rules after the context they refer to", () => {
+      const prompt = grounded();
+      expect(prompt.indexOf("Cite a path only")).toBeGreaterThan(
+        prompt.indexOf("--- REPOSITORY FILES ---")
+      );
+    });
+  });
+
+  /**
+   * Conditional assembly. The saving this restructure exists for, asserted rather
+   * than asserted-about.
+   */
+  describe("conditional assembly", () => {
+    it("drops the artifact rules when the caller reports no file mention", () => {
+      const plain = buildSystemPrompt({ includeArtifactRules: false });
+      expect(plain).not.toContain("<codemind_artifact>");
+      expect(plain).not.toMatch(/never say a download/i);
+    });
+
+    it("keeps the tool-call prohibition even then", () => {
+      // The one rule that can never be conditional: the model invented a tool during
+      // an ordinary request, so no signal would have predicted it.
+      const plain = buildSystemPrompt({ includeArtifactRules: false });
+      expect(plain).toContain('{"tool": ...}');
+      expect(plain).toMatch(/never emit tool-call or function-call syntax/i);
+    });
+
+    it("costs a plain chat turn materially less than the old unconditional prompt", () => {
+      // The old prompt was 377 tokens on EVERY turn, artifact rules included.
+      const plain = estimateTokens(buildSystemPrompt({ includeArtifactRules: false }));
+      expect(plain).toBeLessThan(260);
+    });
+
+    it("keeps even the worst case inside the reserve", () => {
+      // Repo attached AND a file mentioned — everything on at once, which is what
+      // SYSTEM_PROMPT_RESERVE has to be sized for.
+      const worst = estimateTokens(
+        buildSystemPrompt({ hasRepositoryContext: true, includeArtifactRules: true })
+      );
+      expect(worst).toBeLessThanOrEqual(STATIC_PROMPT_TOKEN_BUDGET);
+      expect(STATIC_PROMPT_TOKEN_BUDGET).toBe(520);
+    });
   });
 });
