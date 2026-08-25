@@ -165,6 +165,12 @@ model Conversation {
   /// bumped by it. A losing write matches no row, updates nothing, and is logged.
   /// Non-null with a default so existing rows start at 0 without a backfill.
   summaryVersion Int @default(0)
+  /// Same contract as Project.archivedAt: presentation-only, hides the conversation
+  /// from the default sidebar listing, never touches messages or artifacts. A project
+  /// being archived does not cascade here — a conversation keeps its own archive state
+  /// independent of its project's, so restoring a project does not silently unarchive
+  /// chats the user archived individually.
+  archivedAt DateTime?
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 

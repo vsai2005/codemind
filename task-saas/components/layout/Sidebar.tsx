@@ -38,6 +38,11 @@ interface ArchivedProject {
   name: string;
 }
 
+interface ArchivedConversation {
+  id: string;
+  title: string | null;
+}
+
 function ChevronIcon({ open }: { open: boolean }): React.ReactElement {
   return (
     <svg
@@ -101,6 +106,11 @@ export function Sidebar(): React.ReactElement {
   const [archived, setArchived] = useState<ArchivedProject[]>([]);
   const [archivedLoaded, setArchivedLoaded] = useState(false);
   const [restoringId, setRestoringId] = useState<string | null>(null);
+
+  const [archivedChatsOpen, setArchivedChatsOpen] = useState(false);
+  const [archivedChats, setArchivedChats] = useState<ArchivedConversation[]>([]);
+  const [archivedChatsLoaded, setArchivedChatsLoaded] = useState(false);
+  const [restoringChatId, setRestoringChatId] = useState<string | null>(null);
 
   const router = useRouter();
   const pathname = usePathname();
@@ -178,6 +188,81 @@ export function Sidebar(): React.ReactElement {
       // Nothing was changed server-side; the row stays in the archived list.
     } finally {
       setRestoringId(null);
+    }
+  };
+
+  const loadArchivedChats = useCallback(async () => {
+    try {
+      const response = await fetch("/api/conversations?archived=1");
+      if (!response.ok) return;
+      const body: unknown = await response.json();
+      if (!Array.isArray(body)) return;
+
+      setArchivedChats(
+        body.flatMap((entry): ArchivedConversation[] => {
+          if (typeof entry !== "object" || entry === null) return [];
+          const row = entry as Record<string, unknown>;
+          // ?archived=1 returns active conversations too; only archived ones belong here.
+          if (typeof row.archivedAt !== "string") return [];
+          return typeof row.id === "string"
+            ? [{ id: row.id, title: typeof row.title === "string" ? row.title : null }]
+            : [];
+        })
+      );
+    } catch {
+      // Leave whatever was already listed; the disclosure simply shows nothing new.
+    } finally {
+      setArchivedChatsLoaded(true);
+    }
+  }, []);
+
+  // Fetched only when the user opens the disclosure — same reasoning as loadArchived.
+  useEffect(() => {
+    if (archivedChatsOpen) void loadArchivedChats();
+  }, [archivedChatsOpen, loadArchivedChats]);
+
+  const archiveConversation = async (id: string, event: React.MouseEvent): Promise<void> => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const response = await fetch(`/api/conversations/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ archived: true }),
+    });
+    if (!response.ok) return;
+
+    // Optimistic, then reconciled: matches deleteConversation's pattern below.
+    patchWorkspaceSnapshot((current) => ({
+      ...current,
+      conversations: current.conversations.filter((c) => c.id !== id),
+    }));
+    invalidateWorkspace();
+    // The archived list is stale until the user reopens the disclosure; if it is
+    // already open, drop the fetch cost and reflect the change immediately.
+    if (archivedChatsOpen) void loadArchivedChats();
+
+    if (pathname === `/chat/${id}`) router.push("/dashboard");
+  };
+
+  const restoreConversation = async (id: string): Promise<void> => {
+    if (restoringChatId) return;
+    setRestoringChatId(id);
+    try {
+      const response = await fetch(`/api/conversations/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ archived: false }),
+      });
+      if (!response.ok) return;
+
+      setArchivedChats((current) => current.filter((chat) => chat.id !== id));
+      invalidateWorkspace();
+      router.push(`/chat/${id}`);
+    } catch {
+      // Nothing was changed server-side; the row stays in the archived list.
+    } finally {
+      setRestoringChatId(null);
     }
   };
 
@@ -349,6 +434,18 @@ export function Sidebar(): React.ReactElement {
                       {conv.title || "New Conversation"}
                     </Link>
                     <button
+                      onClick={(e) => void archiveConversation(conv.id, e)}
+                      aria-label="Archive conversation"
+                      title="Archive conversation"
+                      className="p-1 text-gray-400 opacity-0 transition-opacity hover:text-gray-700 focus:opacity-100 group-hover:opacity-100"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <rect x="3" y="4" width="18" height="4" rx="1" />
+                        <path d="M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8" />
+                        <path d="M10 13h4" />
+                      </svg>
+                    </button>
+                    <button
                       onClick={(e) => void deleteConversation(conv.id, e)}
                       aria-label="Delete conversation"
                       title="Delete conversation"
@@ -365,6 +462,53 @@ export function Sidebar(): React.ReactElement {
               {loaded && personalChats.length === 0 && (
                 <p className="px-2 py-1 text-[12px] text-gray-500">No personal chats yet</p>
               )}
+
+              {/* --- Archived chats --------------------------------------- */}
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => setArchivedChatsOpen((v) => !v)}
+                  aria-expanded={archivedChatsOpen}
+                  className="flex w-full items-center gap-1.5 rounded-[6px] px-2 py-[5px] text-left text-[12px] text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                >
+                  <ChevronIcon open={archivedChatsOpen} />
+                  <span>Archived</span>
+                  {archivedChatsOpen && archivedChatsLoaded && archivedChats.length > 0 && (
+                    <span className="ml-auto tabular-nums text-gray-400">{archivedChats.length}</span>
+                  )}
+                </button>
+
+                {archivedChatsOpen && (
+                  <div className="mt-[2px] space-y-[2px]">
+                    {archivedChats.map((chat) => (
+                      <div
+                        key={chat.id}
+                        className="group flex items-center justify-between rounded-[6px] hover:bg-gray-100"
+                      >
+                        <Link
+                          href={`/chat/${chat.id}`}
+                          className="min-w-0 flex-1 truncate px-2 py-[6px] text-[13px] text-gray-500"
+                        >
+                          {chat.title || "New Conversation"}
+                        </Link>
+                        <button
+                          type="button"
+                          onClick={() => void restoreConversation(chat.id)}
+                          disabled={restoringChatId === chat.id}
+                          title="Restore this conversation to Personal"
+                          className="mr-1 shrink-0 rounded-[4px] px-1.5 py-[3px] text-[11px] font-medium text-gray-500 transition-colors hover:bg-white hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
+                        >
+                          {restoringChatId === chat.id ? "Restoring…" : "Restore"}
+                        </button>
+                      </div>
+                    ))}
+
+                    {archivedChatsLoaded && archivedChats.length === 0 && (
+                      <p className="px-2 py-1 text-[12px] text-gray-400">No archived chats</p>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>

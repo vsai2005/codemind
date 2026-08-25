@@ -8,8 +8,16 @@ export async function GET(req: Request) {
     if (!session?.user?.id) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
+
+    // Same contract as GET /api/projects: archived conversations are hidden from the
+    // default listing but never deleted; pass ?archived=1 to see them.
+    const includeArchived = new URL(req.url).searchParams.get("archived") === "1";
+
     const conversations = await prisma.conversation.findMany({
-      where: { userId: session.user.id },
+      where: {
+        userId: session.user.id,
+        ...(includeArchived ? {} : { archivedAt: null }),
+      },
       orderBy: { updatedAt: "desc" },
     });
     return NextResponse.json(conversations);

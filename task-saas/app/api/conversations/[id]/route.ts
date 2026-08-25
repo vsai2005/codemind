@@ -64,10 +64,14 @@ const updateConversationSchema = z
      * into that project — but only if the caller owns that project too (checked below).
      */
     projectId: z.string().min(1).max(64).nullable().optional(),
+    /** true archives, false restores. Archiving never deletes anything. */
+    archived: z.boolean().optional(),
   })
-  .refine((data) => data.title !== undefined || data.projectId !== undefined, {
-    message: "provide a title or a projectId",
-  });
+  .refine(
+    (data) =>
+      data.title !== undefined || data.projectId !== undefined || data.archived !== undefined,
+    { message: "provide a title, a projectId, or archived" }
+  );
 
 /** Rename a conversation, or move it between a project and personal chats. */
 export async function PATCH(
@@ -95,8 +99,12 @@ export async function PATCH(
       return NextResponse.json({ error: "Invalid request" }, { status: 400 });
     }
 
-    const data: { title?: string; projectId?: string | null } = {};
+    const data: { title?: string; projectId?: string | null; archivedAt?: Date | null } = {};
     if (parsed.data.title !== undefined) data.title = parsed.data.title;
+    if (parsed.data.archived !== undefined) {
+      // Archiving is presentation-only: messages and artifacts are untouched.
+      data.archivedAt = parsed.data.archived ? new Date() : null;
+    }
 
     if (parsed.data.projectId !== undefined) {
       if (parsed.data.projectId === null) {
@@ -127,7 +135,7 @@ export async function PATCH(
 
     const conversation = await prisma.conversation.findFirst({
       where: { id: params.id, userId },
-      select: { id: true, title: true, projectId: true, updatedAt: true },
+      select: { id: true, title: true, projectId: true, archivedAt: true, updatedAt: true },
     });
 
     return NextResponse.json({ conversation });
