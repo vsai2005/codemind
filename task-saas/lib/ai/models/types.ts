@@ -18,7 +18,7 @@ import type { LanguageModelV1 } from "ai";
  */
 
 /** Every provider CodeMind can reach. Adding one means adding an adapter. */
-export type ProviderId = "nvidia" | "google" | "deepseek";
+export type ProviderId = "nvidia" | "google" | "deepseek" | "openrouter";
 
 /**
  * Server-side truth about one selectable model.
@@ -31,7 +31,7 @@ export interface ModelDescriptor {
   id: string;
   displayName: string;
   provider: ProviderId;
-  /** Human-facing provider name: "NVIDIA" | "Google" | "DeepSeek". */
+  /** Human-facing provider name: "NVIDIA" | "Google" | "DeepSeek" | "OpenRouter". */
   providerLabel: string;
   /** Real API model id sent to the provider. Server-side only. */
   providerModelId: string;

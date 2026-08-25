@@ -87,6 +87,9 @@ services:
         sync: false
       - key: DEEPSEEK_API_KEY
         sync: false
+      # Serves the Ox Alpha entry, brokered through OpenRouter.
+      - key: OPENROUTER_API_KEY
+        sync: false
 
       # The Gemini model id and its label in the picker.
       #
