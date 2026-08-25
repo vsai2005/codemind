@@ -36,3 +36,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Added by `vercel link`. The CLI also appended a blanket `.env*`, which was
+# removed: it shadows .env.example, a file this repo deliberately tracks. The
+# real env files are already covered by `.env*.local` and `.env` above.
+.vercel

@@ -1,6 +1,12 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: "standalone",
+  /**
+   * Standalone output is for the DOCKER image only (Render), where server.js is the
+   * entrypoint. Vercel builds through its own output pipeline and does not want this
+   * set, so the Dockerfile opts in with DOCKER_BUILD=1 rather than every build paying
+   * for it. Keeping it conditional is what lets the same repo deploy to both.
+   */
+  ...(process.env.DOCKER_BUILD === "1" ? { output: "standalone" } : {}),
 
   experimental: {
     /**

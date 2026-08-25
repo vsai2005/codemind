@@ -29,6 +29,11 @@ COPY . .
 
 ENV NEXT_TELEMETRY_DISABLED=1
 
+# Opts next.config.js into `output: "standalone"`, which produces the server.js this
+# image runs. It is set here rather than unconditionally in the config because Vercel
+# builds the same repo through its own output pipeline and must NOT get standalone.
+ENV DOCKER_BUILD=1
+
 # Prisma Client must be generated before the build so route handlers type-check
 # and the engine is traced into the standalone output.
 RUN npx prisma generate
