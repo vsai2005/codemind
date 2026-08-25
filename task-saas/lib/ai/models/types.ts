@@ -87,6 +87,18 @@ export interface ResolvedModel {
  */
 export interface ProviderAdapter {
   id: ProviderId;
+  /**
+   * True when the provider does its OWN bounded failover before the SDK ever sees a
+   * failure — today only NVIDIA, whose gateway retries across the key pool.
+   *
+   * This drives whether AI SDK retry is allowed on top. Leaving both on multiplies:
+   * the gateway's attempts times the SDK's, up to nine upstream calls for one turn.
+   * Leaving both OFF is the opposite failure and is easy to miss, because the reason
+   * given for disabling SDK retry ("the gateway handles it") is only true for NVIDIA.
+   * For a single-credential provider nothing else is watching, so a transient
+   * retryable 429 ends the turn outright.
+   */
+  hasOwnFailover: boolean;
   /** True when this provider's credentials are present in the environment. */
   isConfigured(): boolean;
   /**

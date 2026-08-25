@@ -75,6 +75,7 @@ function missingCredentialError(envVar: string): Error {
 
 const nvidiaAdapter: ProviderAdapter = {
   id: "nvidia",
+  hasOwnFailover: true,
   isConfigured(): boolean {
     // The pool may hold several keys; one is enough to serve traffic.
     return configuredKeyCount() > 0;
@@ -96,6 +97,7 @@ let googleClient: OpenAICompatibleProvider | null = null;
 
 const googleAdapter: ProviderAdapter = {
   id: "google",
+  hasOwnFailover: false,
   isConfigured(): boolean {
     return readEnv("GEMINI_API_KEY") !== null;
   },
@@ -126,6 +128,7 @@ let deepseekClient: OpenAICompatibleProvider | null = null;
 
 const deepseekAdapter: ProviderAdapter = {
   id: "deepseek",
+  hasOwnFailover: false,
   isConfigured(): boolean {
     return readEnv("DEEPSEEK_API_KEY") !== null;
   },
@@ -184,6 +187,7 @@ let openrouterClient: OpenAICompatibleProvider | null = null;
 
 const openrouterAdapter: ProviderAdapter = {
   id: "openrouter",
+  hasOwnFailover: false,
   isConfigured(): boolean {
     return readEnv("OPENROUTER_API_KEY") !== null;
   },
@@ -233,6 +237,28 @@ const ADAPTERS: Readonly<Record<ProviderId, ProviderAdapter>> = {
   deepseek: deepseekAdapter,
   openrouter: openrouterAdapter,
 };
+
+/**
+ * AI SDK retries for a provider that has no failover of its own.
+ *
+ * Two, matching the SDK's own default. The SDK retries only errors the provider marked
+ * retryable — 429s and 5xx, with exponential backoff — so this cannot turn a rejected
+ * request into three rejected requests; a 400 or an auth failure still fails once.
+ */
+const SDK_RETRIES_WITHOUT_FAILOVER = 2;
+
+/**
+ * How many times the AI SDK may retry a call to this provider.
+ *
+ * Zero wherever the provider already retries for itself, so the two cannot multiply.
+ * Non-zero everywhere else, because otherwise nothing in the stack retries at all: a
+ * single transient 429 from a shared upstream pool ends the user's turn. Ox Alpha made
+ * that concrete — it is free and stealth, so `upstream_provider_shared_pool` 429s
+ * arrive in bursts between perfectly successful calls.
+ */
+export function sdkRetriesFor(id: ProviderId): number {
+  return ADAPTERS[id].hasOwnFailover ? 0 : SDK_RETRIES_WITHOUT_FAILOVER;
+}
 
 /** Adapter for a provider id. Total over ProviderId — never null. */
 export function getProviderAdapter(id: ProviderId): ProviderAdapter {

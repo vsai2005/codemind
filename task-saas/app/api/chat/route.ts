@@ -2,6 +2,7 @@ import { streamText, generateText, type LanguageModelV1 } from "ai";
 import { NextResponse } from "next/server";
 import { getVisionModel, nemotronOptions, NO_CAPACITY_CODE } from "@/lib/ai/gateway";
 import { getDefaultModelId, getNvidiaVisionModelId, resolveModel } from "@/lib/ai/models/registry";
+import { sdkRetriesFor } from "@/lib/ai/models/providers";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/db";
 import {
@@ -67,11 +68,15 @@ function isProviderContextError(error: unknown): boolean {
 }
 
 /**
- * The gateway already performs bounded failover across API keys, so the AI SDK's own
- * retry is switched off. Leaving it at its default of 2 would multiply against the
- * gateway's attempts and fire up to nine upstream calls for a single turn.
+ * Retry policy is per-PROVIDER, not a single constant — see `sdkRetriesFor`.
+ *
+ * It used to be a flat 0, on the reasoning that "the gateway already performs bounded
+ * failover across API keys". That is true and still holds for NVIDIA: leaving the SDK
+ * at its default of 2 would multiply against the gateway and fire up to nine upstream
+ * calls for one turn. But the gateway only wraps NVIDIA. Google, DeepSeek and
+ * OpenRouter are plain single-credential clients with nothing behind them, so a flat 0
+ * meant nothing in the stack retried at all and one transient 429 ended the turn.
  */
-const SDK_RETRIES = 0;
 
 /**
  * True when the provider accepted the connection but never sent response headers.
@@ -318,13 +323,15 @@ async function summarizeDropped(
 ): Promise<void> {
   if (!droppedMessagesContent) return;
 
+  // Conversation memory is model-neutral: one summary serves whichever model the
+  // user has selected. Using the selected model here would make the summary's
+  // character depend on who happened to be answering when it was written.
+  const summaryModel = resolveModel(process.env.CODEMIND_SUMMARY_MODEL || getDefaultModelId());
+
   try {
     const summaryResult = await generateText({
-      // Conversation memory is model-neutral: one summary serves whichever model the
-      // user has selected. Using the selected model here would make the summary's
-      // character depend on who happened to be answering when it was written.
-      model: resolveModel(process.env.CODEMIND_SUMMARY_MODEL || getDefaultModelId()).model,
-      maxRetries: SDK_RETRIES,
+      model: summaryModel.model,
+      maxRetries: sdkRetriesFor(summaryModel.descriptor.provider),
       prompt: buildSummaryPrompt({ existingSummary, droppedMessagesContent }),
       maxTokens: SUMMARY_MAX_OUTPUT_TOKENS,
     });
@@ -796,7 +803,7 @@ export async function POST(req: Request): Promise<Response> {
         system: ctx.systemPrompt,
         messages: [...ctx.messages, activeMessage] as never,
         maxTokens: resolved.effectiveOutputTokens,
-        maxRetries: SDK_RETRIES,
+        maxRetries: sdkRetriesFor(resolved.descriptor.provider),
         ...modelOptions,
         // The user's message is NOT written here — it is persisted before the stream
         // starts (see below). This callback writes the assistant side only.
