@@ -88,6 +88,25 @@ services:
       - key: DEEPSEEK_API_KEY
         sync: false
 
+      # The Gemini model id and its label in the picker.
+      #
+      # Listed rather than left to their defaults because the built-in default is
+      # a Pro id, and Pro ids return 429 on a Flash-only key — the failure looks
+      # like "Gemini is broken" rather than "wrong tier". Set both to the Flash
+      # equivalents (gemini-3-flash-preview / "Gemini 3 Flash") if that is what
+      # the account can actually call. Leave blank to keep the Pro defaults.
+      - key: GEMINI_MODEL
+        sync: false
+      - key: GEMINI_DISPLAY_NAME
+        sync: false
+
+      # --- GitHub: required only for attaching a repository to a project -----
+      # Without it the repo field still renders and every attach fails with
+      # "Repository indexing is not configured on this server." A classic PAT
+      # with NO scopes is enough; only public repositories are supported.
+      - key: GITHUB_TOKEN
+        sync: false
+
 # Token limits (AI_CONTEXT_MAX_TOKENS, AI_MAX_OUTPUT_TOKENS,
 # AI_ARTIFACT_MAX_OUTPUT_TOKENS) are deliberately omitted. Their shipped defaults in
 # lib/env.ts are the documented production values; set them in the Render dashboard
