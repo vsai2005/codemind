@@ -89,7 +89,7 @@ export function PlanPanel({ plan }: { plan: ChatPlan }): React.ReactElement {
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
         aria-controls={panelId}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-gray-100/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-gray-900"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-gray-100/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-500"
       >
         <svg
           width="14"

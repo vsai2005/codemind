@@ -246,10 +246,10 @@ function useSaveState(): [SaveState, (next: SaveState) => void] {
 }
 
 const INPUT_CLASS =
-  "block w-full min-w-0 rounded-[6px] border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm outline-none transition-colors placeholder:text-gray-400 focus:border-gray-400 focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500";
+  "block w-full min-w-0 rounded-[6px] border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm outline-none transition-colors placeholder:text-gray-400 focus:border-gray-400 focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500";
 
 const TEXT_BUTTON_CLASS =
-  "inline-flex items-center gap-1 rounded text-[13px] font-medium text-gray-600 transition-colors hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50";
+  "inline-flex items-center gap-1 rounded text-[13px] font-medium text-gray-600 transition-colors hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50";
 
 function SaveButton({
   label,
@@ -267,7 +267,7 @@ function SaveButton({
       type="button"
       onClick={onClick}
       disabled={disabled || pending}
-      className="inline-flex shrink-0 items-center justify-center gap-2 rounded-[6px] bg-gray-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-40"
+      className="inline-flex shrink-0 items-center justify-center gap-2 rounded-[6px] bg-accent-600 px-4 py-2 text-sm font-medium text-white shadow-elevated transition-colors hover:bg-accent-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-40"
     >
       {pending && (
         <span
@@ -835,7 +835,7 @@ export function ProjectSettings({
                       onClick={() => removeSection(section.key)}
                       aria-label={`Remove ${label}`}
                       title="Remove section"
-                      className="shrink-0 rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-100 hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                      className="shrink-0 rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-100 hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
                     >
                       <RemoveIcon />
                     </button>
@@ -861,7 +861,7 @@ export function ProjectSettings({
                             onClick={() => removeItem(section.key, item.key)}
                             aria-label={`Remove item ${itemIndex + 1} from ${label}`}
                             title="Remove item"
-                            className="shrink-0 rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-100 hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                            className="shrink-0 rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-100 hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
                           >
                             <RemoveIcon />
                           </button>
@@ -930,7 +930,7 @@ export function ProjectSettings({
               onClick={() => void onToggleArchive()}
               disabled={archiveState.kind === "saving"}
               aria-describedby={archiveHintId}
-              className="inline-flex shrink-0 items-center justify-center gap-2 self-start rounded-[6px] border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex shrink-0 items-center justify-center gap-2 self-start rounded-[6px] border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {archiveState.kind === "saving" && (
                 <span

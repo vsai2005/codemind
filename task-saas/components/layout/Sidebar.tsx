@@ -79,7 +79,7 @@ function SectionHeader({
         type="button"
         onClick={onToggle}
         aria-expanded={open}
-        className="flex flex-1 items-center gap-1.5 rounded-[6px] px-2 py-1 text-left transition-colors hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        className="flex flex-1 items-center gap-1.5 rounded-[6px] px-2 py-1 text-left transition-colors hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
       >
         <ChevronIcon open={open} />
         <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">
@@ -302,9 +302,9 @@ export function Sidebar(): React.ReactElement {
         <div className="p-3">
           <Link
             href="/dashboard"
-            className="flex w-full items-center gap-2 rounded-[6px] border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50"
+            className="flex w-full items-center gap-2 rounded-card bg-accent-600 px-3 py-2 text-sm font-medium text-white shadow-elevated transition-colors hover:bg-accent-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2"
           >
-            <span className="text-gray-400">+</span> New Chat
+            <span className="text-accent-200">+</span> New Chat
           </Link>
         </div>
 
@@ -320,7 +320,7 @@ export function Sidebar(): React.ReactElement {
                 onClick={() => setDialogOpen(true)}
                 aria-label="New project"
                 title="New project"
-                className="rounded-[6px] p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                className="rounded-[6px] p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
                   <line x1="12" y1="5" x2="12" y2="19" />
@@ -339,10 +339,10 @@ export function Sidebar(): React.ReactElement {
                     key={project.id}
                     href={`/projects/${project.id}`}
                     className={`flex items-center gap-2 truncate rounded-[6px] px-2 py-[6px] text-[13px] font-medium transition-colors ${
-                      isActive ? "bg-gray-200 text-gray-900" : "hover:bg-gray-100"
+                      isActive ? "bg-accent-50 text-accent-900" : "hover:bg-gray-100"
                     }`}
                   >
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="shrink-0 text-gray-400" aria-hidden="true">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className={`shrink-0 transition-colors ${isActive ? "text-accent-500" : "text-gray-400"}`} aria-hidden="true">
                       <path d="M21 8v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6l2 3h6a2 2 0 0 1 2 2Z" />
                     </svg>
                     <span className="min-w-0 truncate">{project.name}</span>
@@ -366,7 +366,7 @@ export function Sidebar(): React.ReactElement {
                   type="button"
                   onClick={() => setArchivedOpen((v) => !v)}
                   aria-expanded={archivedOpen}
-                  className="flex w-full items-center gap-1.5 rounded-[6px] px-2 py-[5px] text-left text-[12px] text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                  className="flex w-full items-center gap-1.5 rounded-[6px] px-2 py-[5px] text-left text-[12px] text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
                 >
                   <ChevronIcon open={archivedOpen} />
                   <span>Archived</span>
@@ -393,7 +393,7 @@ export function Sidebar(): React.ReactElement {
                           onClick={() => void restoreProject(project.id)}
                           disabled={restoringId === project.id}
                           title="Restore this project to the sidebar"
-                          className="mr-1 shrink-0 rounded-[4px] px-1.5 py-[3px] text-[11px] font-medium text-gray-500 transition-colors hover:bg-white hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
+                          className="mr-1 shrink-0 rounded-[4px] px-1.5 py-[3px] text-[11px] font-medium text-gray-500 transition-colors hover:bg-white hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 disabled:opacity-50"
                         >
                           {restoringId === project.id ? "Restoring…" : "Restore"}
                         </button>
@@ -424,7 +424,7 @@ export function Sidebar(): React.ReactElement {
                   <div
                     key={conv.id}
                     className={`group flex items-center justify-between rounded-[6px] ${
-                      isActive ? "bg-gray-200 text-gray-900" : "hover:bg-gray-100"
+                      isActive ? "bg-accent-50 text-accent-900" : "hover:bg-gray-100"
                     }`}
                   >
                     <Link
@@ -469,7 +469,7 @@ export function Sidebar(): React.ReactElement {
                   type="button"
                   onClick={() => setArchivedChatsOpen((v) => !v)}
                   aria-expanded={archivedChatsOpen}
-                  className="flex w-full items-center gap-1.5 rounded-[6px] px-2 py-[5px] text-left text-[12px] text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                  className="flex w-full items-center gap-1.5 rounded-[6px] px-2 py-[5px] text-left text-[12px] text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
                 >
                   <ChevronIcon open={archivedChatsOpen} />
                   <span>Archived</span>
@@ -496,7 +496,7 @@ export function Sidebar(): React.ReactElement {
                           onClick={() => void restoreConversation(chat.id)}
                           disabled={restoringChatId === chat.id}
                           title="Restore this conversation to Personal"
-                          className="mr-1 shrink-0 rounded-[4px] px-1.5 py-[3px] text-[11px] font-medium text-gray-500 transition-colors hover:bg-white hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
+                          className="mr-1 shrink-0 rounded-[4px] px-1.5 py-[3px] text-[11px] font-medium text-gray-500 transition-colors hover:bg-white hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 disabled:opacity-50"
                         >
                           {restoringChatId === chat.id ? "Restoring…" : "Restore"}
                         </button>

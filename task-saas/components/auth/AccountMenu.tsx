@@ -57,7 +57,7 @@ export function AccountMenu(): React.ReactElement {
         <div
           role="menu"
           aria-label="Account"
-          className="absolute bottom-full left-3 right-3 mb-2 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg"
+          className="absolute bottom-full left-3 right-3 mb-2 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-dropdown"
         >
           <div className="border-b border-gray-100 px-3 py-2.5">
             <p className="truncate text-[13px] font-semibold text-gray-900">{displayName}</p>
@@ -81,7 +81,7 @@ export function AccountMenu(): React.ReactElement {
         onClick={() => setOpen((value) => !value)}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="flex w-full items-center gap-3 rounded-lg px-1 py-1.5 transition-colors hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        className="flex w-full items-center gap-3 rounded-lg px-1 py-1.5 transition-colors hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
       >
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gray-900 text-[11px] font-bold text-white shadow-sm">
           {initialFor(user.name, user.email)}

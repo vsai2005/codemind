@@ -328,7 +328,7 @@ function ErrorState({
       <button
         type="button"
         onClick={onRetry}
-        className="mt-3 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-[13px] font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2"
+        className="mt-3 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-[13px] font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2"
       >
         Try again
       </button>
@@ -444,7 +444,7 @@ function RowMenu({ label, busy, onRename, onMove, onDelete }: RowMenuProps): Rea
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
         aria-label={`Actions for ${label}`}
-        className={`flex h-7 w-7 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-40 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 ${
+        className={`flex h-7 w-7 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 focus:outline-none focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-accent-500 disabled:opacity-40 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 ${
           open ? "bg-gray-100 text-gray-700 sm:opacity-100" : ""
         }`}
       >
@@ -749,7 +749,7 @@ export function ProjectWorkspace({ projectId }: { projectId: string }): React.Re
   const newChatButton = (
     <Link
       href={newChatHref}
-      className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-gray-900 px-3 py-2 text-[13px] font-medium text-white shadow-sm transition-colors hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2"
+      className="inline-flex shrink-0 items-center gap-1.5 rounded-card bg-accent-600 px-3 py-2 text-[13px] font-medium text-white shadow-elevated transition-colors hover:bg-accent-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2"
     >
       <svg
         width="14"
@@ -770,7 +770,7 @@ export function ProjectWorkspace({ projectId }: { projectId: string }): React.Re
   const backLink = (
     <Link
       href="/dashboard"
-      className="inline-flex items-center gap-1.5 rounded-lg text-[13px] font-medium text-gray-500 transition-colors hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2"
+      className="inline-flex items-center gap-1.5 rounded-lg text-[13px] font-medium text-gray-500 transition-colors hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2"
     >
       <span aria-hidden="true">←</span> Projects
     </Link>
@@ -858,9 +858,9 @@ export function ProjectWorkspace({ projectId }: { projectId: string }): React.Re
                   tabIndex={selected ? 0 : -1}
                   onClick={() => setActiveTab(tab.id)}
                   onKeyDown={onTabKeyDown}
-                  className={`shrink-0 whitespace-nowrap border-b-2 px-3 py-2 text-[13px] font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 ${
+                  className={`shrink-0 whitespace-nowrap border-b-2 px-3 py-2 text-[13px] font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 ${
                     selected
-                      ? "border-gray-900 text-gray-900"
+                      ? "border-accent-600 text-accent-700"
                       : "border-transparent text-gray-500 hover:text-gray-900"
                   }`}
                 >
@@ -931,12 +931,12 @@ export function ProjectWorkspace({ projectId }: { projectId: string }): React.Re
                           onKeyDown={(event) => onRenameKeyDown(event, conversation)}
                           onBlur={() => onRenameBlur(conversation)}
                           aria-label={`Rename ${label}`}
-                          className="min-w-0 flex-1 rounded-lg border border-gray-300 px-2 py-1 text-[13px] font-medium text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                          className="min-w-0 flex-1 rounded-lg border border-gray-300 px-2 py-1 text-[13px] font-medium text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
                         />
                       ) : (
                         <Link
                           href={`/chat/${conversation.id}`}
-                          className="flex min-w-0 flex-1 flex-col gap-0.5 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2"
+                          className="flex min-w-0 flex-1 flex-col gap-0.5 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2"
                         >
                           <span className="truncate text-[13px] font-medium text-gray-900">
                             {label}
@@ -1012,7 +1012,7 @@ export function ProjectWorkspace({ projectId }: { projectId: string }): React.Re
                         {artifact.conversationId ? (
                           <Link
                             href={`/chat/${artifact.conversationId}`}
-                            className="block truncate rounded text-[11px] text-gray-400 transition-colors hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                            className="block truncate rounded text-[11px] text-gray-400 transition-colors hover:text-gray-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
                           >
                             From {artifact.conversationTitle || "New Conversation"}
                           </Link>
@@ -1028,7 +1028,7 @@ export function ProjectWorkspace({ projectId }: { projectId: string }): React.Re
                         onClick={() => void downloadArtifact(artifact)}
                         disabled={busy}
                         aria-label={`Download ${artifact.filename}`}
-                        className="flex shrink-0 items-center gap-1.5 rounded-md bg-gray-100 px-2.5 py-1.5 text-[12px] font-medium text-gray-700 transition-colors hover:bg-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 disabled:opacity-50"
+                        className="flex shrink-0 items-center gap-1.5 rounded-md bg-gray-100 px-2.5 py-1.5 text-[12px] font-medium text-gray-700 transition-colors hover:bg-gray-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2 disabled:opacity-50"
                       >
                         {busy ? (
                           <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-gray-500 border-t-transparent" />

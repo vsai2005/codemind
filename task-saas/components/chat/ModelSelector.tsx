@@ -282,7 +282,7 @@ export function ModelSelector({ value, onChange, disabled }: ModelSelectorProps)
         aria-activedescendant={open && activeIndex >= 0 ? `${listboxId}-opt-${activeIndex}` : undefined}
         aria-label={`Model for the next message: ${selected.displayName}`}
         title={disabled ? "Model can't be changed while generating" : "Choose the model for your next message"}
-        className="flex h-[30px] max-w-[190px] items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 text-[13px] font-medium text-gray-700 shadow-sm transition-colors hover:border-gray-300 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-white sm:max-w-none"
+        className="flex h-[30px] max-w-[190px] items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 text-[13px] font-medium text-gray-700 shadow-sm transition-colors hover:border-gray-300 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-white sm:max-w-none"
       >
         <span className="truncate">{selected.displayName}</span>
         <svg
@@ -308,7 +308,7 @@ export function ModelSelector({ value, onChange, disabled }: ModelSelectorProps)
           aria-label="Available models"
           // Anchored to the trigger's right edge and capped to the viewport: the app
           // sets overflow-x:hidden on body, so an overflowing panel would be clipped.
-          className="absolute right-0 top-full z-20 mt-2 max-h-[60vh] w-[min(20rem,calc(100vw-2rem))] overflow-y-auto rounded-xl border border-gray-200 bg-white p-1 shadow-lg"
+          className="absolute right-0 top-full z-20 mt-2 max-h-[60vh] w-[min(20rem,calc(100vw-2rem))] overflow-y-auto rounded-xl border border-gray-200 bg-white p-1 shadow-dropdown"
         >
           {models.map((model, index) => {
             const isSelected = model.id === selectedId;
@@ -326,12 +326,12 @@ export function ModelSelector({ value, onChange, disabled }: ModelSelectorProps)
                 className={`flex cursor-pointer items-start gap-2 rounded-lg px-2.5 py-2 ${
                   model.available
                     ? isActive
-                      ? "bg-gray-100"
+                      ? "bg-accent-50"
                       : "bg-transparent"
                     : "cursor-not-allowed opacity-50"
                 }`}
               >
-                <span className="mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center text-gray-900">
+                <span className="mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center text-accent-600">
                   {isSelected && (
                     <svg
                       width="14"

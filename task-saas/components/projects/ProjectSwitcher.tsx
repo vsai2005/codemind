@@ -85,7 +85,7 @@ export function ProjectSwitcher({
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className="flex max-w-[220px] items-center gap-1.5 rounded-lg px-2 py-1 text-[13px] font-medium text-gray-700 transition-colors hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+        className="flex max-w-[220px] items-center gap-1.5 rounded-lg px-2 py-1 text-[13px] font-medium text-gray-700 transition-colors hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
       >
         <span className="min-w-0 truncate">{activeName}</span>
         <svg
@@ -110,7 +110,7 @@ export function ProjectSwitcher({
           aria-label="Switch workspace"
           // Right-aligned and viewport-capped: body has overflow-x hidden, so an
           // overflowing panel would be clipped rather than scrollable.
-          className="absolute right-0 top-full z-50 mt-1 max-h-[60vh] w-[min(16rem,calc(100vw-2rem))] overflow-y-auto rounded-lg border border-gray-200 bg-white py-1 shadow-lg"
+          className="absolute right-0 top-full z-50 mt-1 max-h-[60vh] w-[min(16rem,calc(100vw-2rem))] overflow-y-auto rounded-lg border border-gray-200 bg-white py-1 shadow-dropdown"
         >
           <button
             type="button"

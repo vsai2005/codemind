@@ -196,7 +196,7 @@ export function AuthForm({ mode, demoEnabled }: AuthFormProps): React.ReactEleme
   };
 
   const inputClass = (hasError: boolean): string =>
-    `block w-full rounded-[6px] border bg-white px-3 py-2 text-sm text-gray-900 shadow-sm outline-none transition-colors placeholder:text-gray-400 focus:border-gray-400 focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500 ${
+    `block w-full rounded-[6px] border bg-white px-3 py-2 text-sm text-gray-900 shadow-sm outline-none transition-colors placeholder:text-gray-400 focus:border-gray-400 focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-500 ${
       hasError ? "border-red-300" : "border-gray-300"
     }`;
 
@@ -290,7 +290,7 @@ export function AuthForm({ mode, demoEnabled }: AuthFormProps): React.ReactEleme
         <button
           type="submit"
           disabled={submitting}
-          className="flex w-full items-center justify-center gap-2 rounded-[6px] bg-gray-900 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition-colors hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+          className="flex w-full items-center justify-center gap-2 rounded-[6px] bg-accent-600 px-4 py-2.5 text-sm font-medium text-white shadow-elevated transition-colors hover:bg-accent-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {submitting && (
             <span
@@ -308,7 +308,7 @@ export function AuthForm({ mode, demoEnabled }: AuthFormProps): React.ReactEleme
           type="button"
           onClick={toggleMode}
           disabled={submitting}
-          className="rounded font-medium text-gray-900 underline underline-offset-2 transition-colors hover:text-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+          className="rounded font-medium text-gray-900 underline underline-offset-2 transition-colors hover:text-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {isSignup ? "Sign In" : "Sign Up"}
         </button>
@@ -326,7 +326,7 @@ export function AuthForm({ mode, demoEnabled }: AuthFormProps): React.ReactEleme
             type="button"
             onClick={() => void onDemo()}
             disabled={submitting}
-            className="flex w-full items-center justify-center gap-2 rounded-[6px] border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+            className="flex w-full items-center justify-center gap-2 rounded-[6px] border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
           >
             Continue as demo user
           </button>

@@ -214,7 +214,7 @@ export function Composer({
                   type="button"
                   onClick={() => removeAttachment(att.id)}
                   aria-label={`Remove ${att.name ?? "attachment"}`}
-                  className="absolute right-2 rounded text-gray-400 transition-colors hover:text-red-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900"
+                  className="absolute right-2 rounded text-gray-400 transition-colors hover:text-red-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                     <line x1="18" y1="6" x2="6" y2="18" />
@@ -263,7 +263,7 @@ export function Composer({
             disabled={uploading}
             aria-label="Attach file"
             title="Attach file"
-            className="rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 disabled:opacity-50"
+            className="rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 disabled:opacity-50"
           >
             {uploading ? (
               <div className="h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-gray-600" />
@@ -282,7 +282,7 @@ export function Composer({
               onClick={stop}
               aria-label="Stop generating"
               title="Stop generating"
-              className="rounded-lg bg-gray-900 p-2 text-white shadow-sm transition-colors hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2"
+              className="rounded-card bg-accent-600 p-2 text-white shadow-elevated transition-colors hover:bg-accent-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <rect x="6" y="6" width="12" height="12" rx="1.5" />
@@ -294,7 +294,7 @@ export function Composer({
               disabled={!canSend}
               aria-label="Send message"
               title="Send message"
-              className="rounded-lg bg-gray-900 p-2 text-white shadow-sm transition-colors hover:bg-gray-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-30"
+              className="rounded-card bg-accent-600 p-2 text-white shadow-elevated transition-colors hover:bg-accent-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-30"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <line x1="12" y1="19" x2="12" y2="5" />

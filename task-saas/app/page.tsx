@@ -26,7 +26,7 @@ export default async function LandingPage() {
             </Link>
             <Link 
               href="/login" 
-              className="text-sm font-medium bg-gray-900 text-white px-4 py-2 rounded-lg hover:bg-gray-800 transition-colors shadow-sm"
+              className="text-sm font-medium bg-accent-600 text-white px-4 py-2 rounded-card hover:bg-accent-700 transition-colors shadow-elevated"
             >
               Open Workspace
             </Link>
@@ -46,7 +46,7 @@ export default async function LandingPage() {
         <div className="flex gap-4 mb-20">
           <Link 
             href="/login" 
-            className="text-sm font-medium bg-gray-900 text-white px-6 py-3 rounded-lg hover:bg-gray-800 transition-all shadow-md hover:shadow-lg"
+            className="text-sm font-medium bg-accent-600 text-white px-6 py-3 rounded-card hover:bg-accent-700 transition-all shadow-elevated hover:shadow-dropdown"
           >
             Open CodeMind
           </Link>
@@ -110,7 +110,7 @@ export default async function LandingPage() {
           <h2 className="text-2xl font-bold text-gray-900 mb-6">Start building with CodeMind.</h2>
           <Link 
             href="/login" 
-            className="text-sm font-medium bg-gray-900 text-white px-8 py-3.5 rounded-lg hover:bg-gray-800 transition-all inline-block shadow-sm"
+            className="text-sm font-medium bg-accent-600 text-white px-8 py-3.5 rounded-card hover:bg-accent-700 transition-all inline-block shadow-elevated"
           >
             Open CodeMind
           </Link>
