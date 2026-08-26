@@ -1,4 +1,4 @@
-import { estimateTokens, queryTerms } from "@/lib/ai/context-manager";
+import { estimateTokens, identifierWords, queryTerms } from "@/lib/ai/context-manager";
 
 /**
  * Choosing which files a question needs, from the index alone.
@@ -124,14 +124,14 @@ export interface ScoredFile extends IndexedFile {
  * Split a path segment or a symbol into lowercase words, breaking on separators AND
  * camelCase. One rule for both, because `isPlainObject` and `is-plain-object` name the
  * same thing and a question says "plain object" either way.
+ *
+ * The splitting itself is `identifierWords`, shared with `queryTerms` so the index and
+ * the question cannot tokenize differently — they did, and an exact symbol name scored
+ * zero as a result. Stemming stays here: it is a scoring concern, and scoreFiles
+ * applies the same stem to the question's terms.
  */
 function pathWords(segment: string): string[] {
-  return segment
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((w) => w.length > 0)
-    .map(stem);
+  return identifierWords(segment).map(stem);
 }
 
 /**

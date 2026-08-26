@@ -158,6 +158,44 @@ function clampToTokens(text: string, maxTokens: number): string {
 // Scoring
 // ---------------------------------------------------------------------------
 
+/** A bare identifier: no path separators, dots or spaces to confuse a compound with. */
+const IDENTIFIER_ONLY = /^[A-Za-z0-9_$]+$/;
+
+/**
+ * Split one word into the tokens it should match on, breaking camelCase and separators.
+ *
+ * THE SINGLE TOKENIZER FOR BOTH SIDES OF REPOSITORY SCORING. `pathWords` in
+ * lib/repo/selection.ts calls this, and so does `queryTerms` below, because the two
+ * sides drifting apart is not a hypothetical: the index split camelCase and the query
+ * did not, so `validateConcurrency` was indexed as `validate` + `concurrency` while the
+ * question tokenized to the single token `validateconcurrency`. It matched nothing.
+ * A question naming an indexed symbol by its exact name scored ZERO, and only returned
+ * a correct answer when `fallbackFiles` happened to pick the right file anyway.
+ *
+ * THE COMPOUND IS KEPT TOO, ahead of the parts. Splitting alone fixes the miss but
+ * makes `validateConcurrency` score identically to a file declaring `validateInput`
+ * and `concurrencyLimit` — both match `validate` and `concurrency`. Keeping the whole
+ * name as a token gives the file that actually declares it one more hit, so an exact
+ * name outranks a coincidental pair.
+ *
+ * Only for real identifiers. "src/lib" and "index.js" would otherwise contribute
+ * "srclib" and "indexjs", which name nothing and no question would ever contain.
+ */
+export function identifierWords(segment: string): string[] {
+  const parts = segment
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w.length > 0);
+
+  if (parts.length > 1 && IDENTIFIER_ONLY.test(segment)) {
+    const compound = segment.toLowerCase().replace(/[^a-z0-9]+/g, "");
+    if (compound.length > 0 && !parts.includes(compound)) return [compound, ...parts];
+  }
+
+  return parts;
+}
+
 /**
  * Split a question into the terms worth matching on.
  *
@@ -165,13 +203,16 @@ function clampToTokens(text: string, maxTokens: number): string {
  * message that retrieval does. `scoreText` below is deliberately NOT exported: it
  * scores prose, and paths need different weighting — see lib/repo/selection.ts for
  * why forcing that one to be shared would have been the wrong kind of reuse.
+ *
+ * Splits on identifier boundaries BEFORE lowercasing, because lowercasing first
+ * destroys the camelCase boundary this has to see.
  */
 export function queryTerms(query: string): string[] {
   return Array.from(
     new Set(
       query
-        .toLowerCase()
-        .split(/\W+/)
+        .split(/[^A-Za-z0-9_$]+/)
+        .flatMap((word) => identifierWords(word))
         .filter((t) => t.length > 2)
     )
   );
