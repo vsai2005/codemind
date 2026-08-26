@@ -149,17 +149,21 @@ describe("repository file selection candidates", () => {
   });
 
   /**
-   * WHY THE QUERY IS THE ONLY GUARD.
+   * THE QUERY IS NO LONGER THE ONLY GUARD — and this asserts the redundancy, not just
+   * the clause above.
    *
-   * Nothing downstream re-checks `language`. `fallbackFiles` — which runs precisely
-   * when scoring finds nothing, so on the vaguest questions — returns whatever
-   * candidates it was handed, ordered by depth and size. Hand it a README and it will
-   * spend a GitHub request and a share of the context budget on prose.
+   * It used to be. `fallbackFiles` runs precisely when scoring finds nothing, so on the
+   * vaguest questions, and orders by depth and size — a root-level README outranked
+   * code nested under source/. Handed an unfiltered list it returned the README, and
+   * this test previously asserted exactly that, recording the exposure.
    *
-   * This is not a criticism of fallbackFiles; filtering there would duplicate the
-   * decision. It is the reason the where clause above must not be quietly dropped.
+   * `isSelectableSource` in lib/repo/selection.ts now refuses null-language rows
+   * independently, so dropping the where clause degrades efficiency (the database
+   * returns rows that are then discarded) rather than correctness. Both layers are
+   * asserted because the point is that either alone would be enough, and neither is
+   * relied upon alone.
    */
-  it("has no downstream guard: fallbackFiles returns unfiltered rows as given", () => {
+  it("refuses null-language rows even when the caller does not pre-filter", () => {
     const unfiltered: IndexedFile[] = [
       { path: "readme.md", size: 4972, language: null, symbols: [], internalSymbols: [] },
       { path: "index.js", size: 3315, language: "javascript", symbols: ["pLimit"], internalSymbols: [] },
@@ -167,6 +171,7 @@ describe("repository file selection candidates", () => {
 
     const chosen = fallbackFiles(unfiltered, [], 2);
 
-    expect(chosen.map((c) => c.path)).toContain("readme.md");
+    expect(chosen.map((c) => c.path)).not.toContain("readme.md");
+    expect(chosen.map((c) => c.path)).toContain("index.js");
   });
 });

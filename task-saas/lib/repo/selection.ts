@@ -121,6 +121,27 @@ export interface ScoredFile extends IndexedFile {
 }
 
 /**
+ * Can this row ever be worth fetching? Only if the indexer recognised it as source.
+ *
+ * `language: null` is `languageForPath`'s verdict that a file has no recognised source
+ * extension — READMEs, lockfiles, licences, dotfiles, binaries. They are indexed so the
+ * file list stays an honest picture of the repository, but reading one spends a GitHub
+ * request and a share of the context budget to tell the model nothing.
+ *
+ * DELIBERATELY REDUNDANT with the `NOT: { language: null }` clause in the chat route's
+ * query. That clause was the only thing enforcing this, which made it a single point of
+ * failure: nothing here re-checked, so a caller that forgot it — or a refactor that
+ * dropped it — would silently put prose in front of the model with no error at all.
+ * `fallbackFiles` made that worst: it runs precisely when scoring finds nothing, on the
+ * vaguest questions, and orders by depth and size, so a root-level README outranks code
+ * nested under source/. The query should still filter, so the database returns less;
+ * this makes the filter's absence impossible rather than merely unlikely.
+ */
+function isSelectableSource(file: IndexedFile): boolean {
+  return Boolean(file.language);
+}
+
+/**
  * Split a path segment or a symbol into lowercase words, breaking on separators AND
  * camelCase. One rule for both, because `isPlainObject` and `is-plain-object` name the
  * same thing and a question says "plain object" either way.
@@ -166,7 +187,13 @@ export function scoreFiles(files: readonly IndexedFile[], question: string): Sco
   // Stemmed on both sides: the question's words and the file's words have to meet in
   // the same form or the match never happens.
   const terms = Array.from(new Set(queryTerms(question).map(stem)));
-  if (terms.length === 0 || files.length === 0) return [];
+
+  // Dropped before anything else, so an unrecognised file cannot be scored AND cannot
+  // skew the ubiquity ratio below — that share is only meaningful over files that were
+  // candidates in the first place. Without this a question mentioning "readme" scored
+  // readme.md on its basename and returned it.
+  const candidates = files.filter(isSelectableSource);
+  if (terms.length === 0 || candidates.length === 0) return [];
 
   // How many paths contain each term at all, used to discount structural vocabulary.
   const documentFrequency = new Map<string, number>();
@@ -175,7 +202,7 @@ export function scoreFiles(files: readonly IndexedFile[], question: string): Sco
     { base: string[]; dirs: string[]; symbols: string[]; internal: string[] }
   >();
 
-  for (const file of files) {
+  for (const file of candidates) {
     const slash = file.path.lastIndexOf("/");
     const base = pathWords(file.path.slice(slash + 1));
     const dirs = slash > 0 ? pathWords(file.path.slice(0, slash)) : [];
@@ -192,10 +219,10 @@ export function scoreFiles(files: readonly IndexedFile[], question: string): Sco
   }
 
   const ubiquitous =
-    files.length >= MIN_FILES_FOR_UBIQUITY_FILTER
+    candidates.length >= MIN_FILES_FOR_UBIQUITY_FILTER
       ? new Set(
           terms.filter(
-            (term) => (documentFrequency.get(term) ?? 0) > files.length * UBIQUITOUS_TERM_RATIO
+            (term) => (documentFrequency.get(term) ?? 0) > candidates.length * UBIQUITOUS_TERM_RATIO
           )
         )
       : new Set<string>();
@@ -209,7 +236,7 @@ export function scoreFiles(files: readonly IndexedFile[], question: string): Sco
 
   const scored: ScoredFile[] = [];
 
-  for (const file of files) {
+  for (const file of candidates) {
     const words = wordsByPath.get(file.path);
     if (!words) continue;
 
@@ -263,7 +290,13 @@ export function fallbackFiles(
   entryPoints: readonly string[],
   maxFiles: number
 ): ScoredFile[] {
-  const byPath = new Map(files.map((f) => [f.path, f]));
+  // Filtered once, up front, so neither the entry-point pass nor the depth-ordered
+  // sweep below can reach an unrecognised file. Entry points are not language-checked
+  // where they are detected, so a repository whose entry point resolves to a non-source
+  // file would otherwise surface one here.
+  const candidates = files.filter(isSelectableSource);
+
+  const byPath = new Map(candidates.map((f) => [f.path, f]));
   const chosen: ScoredFile[] = [];
 
   for (const path of entryPoints) {
@@ -272,7 +305,7 @@ export function fallbackFiles(
     if (chosen.length >= maxFiles) return chosen;
   }
 
-  const remaining = files
+  const remaining = candidates
     .filter((f) => !chosen.some((c) => c.path === f.path))
     .sort((a, b) => {
       const depth = a.path.split("/").length - b.path.split("/").length;
