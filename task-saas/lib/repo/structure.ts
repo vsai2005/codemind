@@ -107,7 +107,88 @@ export interface RepoStructure {
   testCommand: string | null;
   totalFiles: number;
   sourceFiles: number;
+  /**
+   * What the user actually got. Absent on snapshots indexed before this existed, which
+   * is why it is optional rather than defaulted — "we did not record it" and "we
+   * recorded zero" are different claims and must not be collapsed.
+   */
+  coverage?: IndexCoverage;
 }
+
+/**
+ * How complete this index is, in the terms a user would ask about.
+ *
+ * WHY THIS IS RECORDED AT ALL
+ * Symbol extraction covers JavaScript and TypeScript. A Python, Go or Rust repository
+ * indexes to `status: "ready"` with zero symbols and answers questions from paths
+ * alone — usable, measurably weaker, and previously indistinguishable from a fully
+ * indexed one. The only trace was `symbolsExtracted: false`, which was written and
+ * never read by anything.
+ *
+ * The fix is honesty, not coverage: these numbers exist so the limitation can be
+ * stated, not so it can be hidden behind a status of "ready".
+ */
+export interface IndexCoverage {
+  /** Rows written, including files with no recognised language. */
+  indexedFiles: number;
+  /** Files whose language the extractor supports — the ceiling on symbol coverage. */
+  symbolEligibleFiles: number;
+  /** Files that actually contributed at least one symbol. */
+  filesWithSymbols: number;
+  /** Recognised languages present, whether or not symbols could be extracted. */
+  languages: string[];
+  /** Recognised languages present that the extractor does not cover. */
+  languagesWithoutSymbols: string[];
+  /**
+   * False when extraction never ran — an unsupported primary language, or an archive
+   * that could not be read. Distinct from running and finding nothing.
+   */
+  symbolsExtracted: boolean;
+}
+
+/**
+ * Coverage as one sentence, or null when there is nothing worth saying.
+ *
+ * Null on a fully covered index: a message that always appears is noise, and a user
+ * whose JavaScript repo indexed completely does not need telling that JavaScript is
+ * supported. It speaks up only where expectations would otherwise be wrong.
+ *
+ * Built here rather than in the route so the API response and any UI say the same
+ * thing. The numbers are counts, not adjectives — "312 files were indexed by path and
+ * content only" is checkable; "partial coverage" is not.
+ */
+export function describeCoverage(coverage: IndexCoverage | undefined): string | null {
+  if (!coverage) return null;
+
+  const { indexedFiles, symbolEligibleFiles, filesWithSymbols, languagesWithoutSymbols } = coverage;
+  const withoutSymbols = indexedFiles - filesWithSymbols;
+  if (withoutSymbols <= 0) return null;
+
+  const file = (n: number): string => `${n.toLocaleString("en-US")} file${n === 1 ? "" : "s"}`;
+  const head = `Indexed ${file(indexedFiles)}.`;
+
+  // Extraction never ran: an unsupported primary language, or an unreadable archive.
+  // Naming the supported set is the actionable part — it says what WOULD work.
+  if (!coverage.symbolsExtracted || symbolEligibleFiles === 0) {
+    const found =
+      languagesWithoutSymbols.length > 0
+        ? ` Detected: ${languagesWithoutSymbols.join(", ")}.`
+        : "";
+    return (
+      `${head} Symbol extraction currently supports ${SYMBOL_LANGUAGE_LABEL} only, so all ` +
+      `${file(indexedFiles)} were indexed by path and content only.${found} ` +
+      `Answers still work, but questions naming a function or class are matched less precisely.`
+    );
+  }
+
+  return (
+    `${head} Symbol extraction currently supports ${SYMBOL_LANGUAGE_LABEL} only, so ` +
+    `${file(withoutSymbols)} were indexed by path and content only.`
+  );
+}
+
+/** Human-facing name for the supported set. Kept beside describeCoverage, its only use. */
+const SYMBOL_LANGUAGE_LABEL = "JavaScript and TypeScript";
 
 /** True for paths inside vendored or generated trees. */
 export function isIgnoredPath(path: string): boolean {

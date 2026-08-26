@@ -82,6 +82,21 @@ function parseCreatedProject(body: unknown): CreatedProject | null {
   return { id: candidate.id, name: candidate.name };
 }
 
+/**
+ * Pull `coverageNote` off a successful ingest body.
+ *
+ * The route sends this only when there is a limitation worth stating — symbol
+ * extraction covers JavaScript and TypeScript, so a Python or Go repository indexes
+ * fine but is matched by path and content alone. Null on a fully covered index, and
+ * this returns null for anything unexpected, so a malformed body shows nothing rather
+ * than something wrong.
+ */
+function readCoverageNote(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const note = (body as Record<string, unknown>).coverageNote;
+  return typeof note === "string" && note.trim().length > 0 ? note : null;
+}
+
 /** Pull `{ error }` off a JSON body without trusting its shape. */
 function readErrorMessage(body: unknown, fallback: string): string {
   if (body && typeof body === "object") {
@@ -106,6 +121,8 @@ export function NewProjectDialog({
   const [createdWithRepoWarning, setCreatedWithRepoWarning] = useState<{
     project: CreatedProject;
     warning: string;
+    /** "info" is a successful index with a stated limitation, not a failure. */
+    severity?: "error" | "info";
   } | null>(null);
   const [indexingRepo, setIndexingRepo] = useState(false);
 
@@ -328,6 +345,17 @@ export function NewProjectDialog({
           return;
         }
 
+        // Indexing succeeded, but succeeding is not the same as covering everything.
+        // A note here means the index is real and weaker than the user would assume,
+        // which they can only act on if they are told before they start asking
+        // questions of it.
+        const note = readCoverageNote(repoPayload);
+        if (note) {
+          setIndexingRepo(false);
+          setCreatedWithRepoWarning({ project: created, warning: note, severity: "info" });
+          return;
+        }
+
         resetFields();
         onCreated(created);
         onClose();
@@ -413,13 +441,29 @@ export function NewProjectDialog({
 
         {createdWithRepoWarning ? (
           <div className="space-y-4">
-            <div
-              role="alert"
-              className="rounded-[6px] border border-amber-200 bg-amber-50 p-3 text-sm font-medium text-amber-900"
-            >
-              The project was created, but its repository could not be indexed:{" "}
-              {createdWithRepoWarning.warning}
-            </div>
+            {/*
+              Two different messages share this slot, and conflating them would be its
+              own dishonesty: one says indexing FAILED, the other says it SUCCEEDED with
+              a limitation worth knowing. Amber on a working index would read as a
+              problem the user has to solve.
+            */}
+            {createdWithRepoWarning.severity === "info" ? (
+              <div
+                role="status"
+                className="rounded-[6px] border border-accent-200 bg-accent-50 p-3 text-sm text-accent-900"
+              >
+                <span className="font-medium">Repository indexed.</span>{" "}
+                {createdWithRepoWarning.warning}
+              </div>
+            ) : (
+              <div
+                role="alert"
+                className="rounded-[6px] border border-amber-200 bg-amber-50 p-3 text-sm font-medium text-amber-900"
+              >
+                The project was created, but its repository could not be indexed:{" "}
+                {createdWithRepoWarning.warning}
+              </div>
+            )}
             <div className="flex justify-end pt-1">
               <button
                 type="button"

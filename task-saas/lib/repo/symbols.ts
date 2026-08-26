@@ -52,9 +52,18 @@ const USELESS = new Set(["default", "undefined", "null", "true", "false"]);
 /** Bound so a generated or minified file cannot contribute thousands of names. */
 const MAX_SYMBOLS_PER_FILE = 100;
 
+/**
+ * Languages this extractor understands.
+ *
+ * Exported so coverage reporting names them rather than restating them — a list that
+ * has to be kept in step with this one by hand is a list that will drift, and the
+ * drift would be a message telling users something untrue about what they got.
+ */
+export const SYMBOL_LANGUAGES: readonly string[] = ["javascript", "typescript"];
+
 /** True for languages this extractor understands. */
 export function supportsSymbols(language: string | null): boolean {
-  return language === "javascript" || language === "typescript";
+  return language !== null && SYMBOL_LANGUAGES.includes(language);
 }
 
 /**

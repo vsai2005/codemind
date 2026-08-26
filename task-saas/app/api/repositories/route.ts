@@ -6,6 +6,7 @@ import { enforceRateLimit } from "@/lib/rate-limit";
 import { enforceBodyLimit } from "@/lib/http/body-limit";
 import { parseRepoUrl } from "@/lib/repo/github";
 import { ingestRepository } from "@/lib/repo/ingest";
+import { describeCoverage } from "@/lib/repo/structure";
 
 /**
  * Attach a public GitHub repository to a project and index it.
@@ -96,6 +97,20 @@ export async function POST(req: Request): Promise<Response> {
       fileCount: result.fileCount,
       /** True when an existing snapshot for the same commit was reused. */
       reused: result.reused,
+      /**
+       * What the user actually got, in counts rather than adjectives.
+       *
+       * Symbol extraction covers JavaScript and TypeScript, so a Python or Go
+       * repository indexes to `ready` with no symbols and answers from paths alone —
+       * usable, weaker, and until now indistinguishable from a full index. `coverage`
+       * carries the numbers; `coverageNote` is the sentence, built in one place so the
+       * API and the UI cannot describe the same index differently.
+       *
+       * Null when there is nothing worth saying, which is the fully covered case. A
+       * message that always appears is one nobody reads.
+       */
+      coverage: result.coverage ?? null,
+      coverageNote: describeCoverage(result.coverage),
     });
   } catch (error) {
     logger.error("Repository ingestion failed", {

@@ -11,7 +11,12 @@ import {
 } from "@/lib/repo/github";
 import { readTarball } from "@/lib/repo/archive";
 import { extractInternalSymbols, extractSymbols, supportsSymbols } from "@/lib/repo/symbols";
-import { detectStructure, languageForPath, primaryLanguage } from "@/lib/repo/structure";
+import {
+  detectStructure,
+  languageForPath,
+  primaryLanguage,
+  type IndexCoverage,
+} from "@/lib/repo/structure";
 
 /**
  * Build the index for one public repository snapshot.
@@ -40,7 +45,17 @@ import { detectStructure, languageForPath, primaryLanguage } from "@/lib/repo/st
 export const MAX_INDEXED_FILES = 4000;
 
 export type IngestResult =
-  | { ok: true; repositoryId: string; fileCount: number; reused: boolean }
+  | {
+      ok: true;
+      repositoryId: string;
+      fileCount: number;
+      reused: boolean;
+      /**
+       * What the caller can honestly tell the user about this index. Absent on a
+       * reused snapshot indexed before coverage was recorded — see the read below.
+       */
+      coverage?: IndexCoverage;
+    }
   | { ok: false; error: string };
 
 /**
@@ -84,13 +99,24 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
     where: {
       owner_name_commitSha: { owner: ref.owner, name: ref.name, commitSha: meta.commitSha },
     },
-    select: { id: true, status: true, fileCount: true },
+    select: { id: true, status: true, fileCount: true, structure: true },
   });
 
   // Only a `ready` snapshot may be reused. Anything else was interrupted, and its rows
   // are a partial list that must not be mistaken for the repository.
   if (existing?.status === "ready") {
-    return { ok: true, repositoryId: existing.id, fileCount: existing.fileCount, reused: true };
+    return {
+      ok: true,
+      repositoryId: existing.id,
+      fileCount: existing.fileCount,
+      reused: true,
+      // Read back rather than recomputed. Without this, re-attaching an already
+      // indexed repository would answer with no coverage at all and silently drop the
+      // limitation message — the exact silence this change removes. Undefined for a
+      // snapshot indexed before coverage was recorded, which is honest: not measured
+      // is not the same as measured zero.
+      coverage: readCoverage(existing.structure),
+    };
   }
 
   const repository =
@@ -103,7 +129,7 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
         commitSha: meta.commitSha,
         status: "pending",
       },
-      select: { id: true, status: true, fileCount: true },
+      select: { id: true, status: true, fileCount: true, structure: true },
     }));
 
   await prisma.repository.update({
@@ -200,6 +226,32 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
     }));
 
     /**
+     * Coverage, counted from the rows actually written rather than assumed.
+     *
+     * Derived here because this is the only place that has both the language of every
+     * file and what extraction produced for it. Recomputing it later from the database
+     * would be a second implementation of the same arithmetic, free to disagree with
+     * this one — and a coverage report that disagrees with the index is worse than
+     * none, because it is believed.
+     */
+    const languagesPresent = Array.from(
+      new Set(rows.map((row) => row.language).filter((l): l is string => l !== null))
+    ).sort();
+
+    const coverage = {
+      indexedFiles: rows.length,
+      symbolEligibleFiles: rows.filter((row) => supportsSymbols(row.language)).length,
+      filesWithSymbols: rows.filter(
+        (row) => row.symbols.length > 0 || row.internalSymbols.length > 0
+      ).length,
+      languages: languagesPresent,
+      languagesWithoutSymbols: languagesPresent.filter((l) => !supportsSymbols(l)),
+      symbolsExtracted,
+    };
+
+    const structureWithCoverage = { ...structure, coverage };
+
+    /**
      * The file rows and the terminal status commit together.
      *
      * `ready` must never be observable without the rows behind it. A reader that saw
@@ -219,7 +271,7 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
           fileCount: rows.length,
           primaryLanguage: language,
           symbolsExtracted,
-          structure: structure as unknown as object,
+          structure: structureWithCoverage as unknown as object,
         },
       }),
     ]);
@@ -246,12 +298,38 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
       totalMs: Date.now() - ingestStarted,
     });
 
-    return { ok: true, repositoryId: repository.id, fileCount: rows.length, reused: false };
+    return {
+      ok: true,
+      repositoryId: repository.id,
+      fileCount: rows.length,
+      reused: false,
+      coverage,
+    };
   } catch (error) {
     const message = describe(error);
     await fail(repository.id, message);
     return { ok: false, error: message };
   }
+}
+
+/**
+ * Pull coverage out of a stored `structure` blob without trusting its shape.
+ *
+ * The column is Json and predates this field, so rows written by earlier versions have
+ * no coverage at all. Returning undefined for those is deliberate: describeCoverage
+ * then says nothing, rather than reporting a confident zero for something that was
+ * never measured.
+ */
+function readCoverage(structure: unknown): IndexCoverage | undefined {
+  if (typeof structure !== "object" || structure === null) return undefined;
+  const coverage = (structure as Record<string, unknown>).coverage;
+  if (typeof coverage !== "object" || coverage === null) return undefined;
+
+  const c = coverage as Record<string, unknown>;
+  if (typeof c.indexedFiles !== "number" || typeof c.symbolsExtracted !== "boolean") {
+    return undefined;
+  }
+  return coverage as unknown as IndexCoverage;
 }
 
 /** Record why an index could not be built, so the UI can say more than "failed". */
