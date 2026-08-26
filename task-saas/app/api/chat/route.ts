@@ -749,9 +749,14 @@ export async function POST(req: Request): Promise<Response> {
       });
 
       // The generation outlives this function, so the slot travels with the stream.
+      //
+      // continueOnCancel for the same reason as the chat path, and with more at stake:
+      // an artifact turn ends by building a file and persisting it, so aborting it
+      // partway spends the expensive generation and produces no download at all.
       slotHandedToStream = true;
       return releaseOnStreamEnd(artifactResponse, {
         onSettled: releaseSlot,
+        continueOnCancel: true,
         timeoutMs: GENERATION_SLOT_MAX_LIFETIME_MS,
         onTimeout: () => {
           logger.warn("Reclaimed a generation slot from an abandoned artifact stream", {
@@ -1029,11 +1034,17 @@ export async function POST(req: Request): Promise<Response> {
       ? createDataStreamPrefix(streamed, [{ codemindPlan: plan } as never])
       : streamed;
 
-    // Released when the client finishes reading, disconnects, or the stream errors —
-    // and, failing all three, reclaimed by the timeout so the slot cannot leak.
+    // Released when the client finishes reading or the stream errors — and, failing
+    // both, reclaimed by the timeout so the slot cannot leak.
+    //
+    // A DISCONNECT IS NOT A CANCELLATION. Navigating to another conversation used to
+    // abort the provider request mid-sentence and persist an empty reply, losing a
+    // turn the user had already paid for. `continueOnCancel` keeps the generation
+    // running so onFinish still writes it, and it is waiting when they come back.
     slotHandedToStream = true;
     return releaseOnStreamEnd(withPlan, {
       onSettled: releaseSlot,
+      continueOnCancel: true,
       timeoutMs: GENERATION_SLOT_MAX_LIFETIME_MS,
       onTimeout: () => {
         logger.warn("Reclaimed a generation slot from an abandoned chat stream", {

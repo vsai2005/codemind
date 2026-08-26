@@ -22,6 +22,24 @@ export interface StreamLifecycleOptions {
   timeoutMs?: number;
   /** Called instead of onSettled when the timeout fires, so callers can distinguish. */
   onTimeout?: () => void;
+  /**
+   * Keep the generation running when the CONSUMER goes away.
+   *
+   * A browser disconnect — navigating to another conversation, closing the tab —
+   * surfaces here as a cancel on the response body. Propagating it upstream aborts the
+   * provider request mid-sentence, so the SDK's onFinish either never runs or runs
+   * with partial text, and the turn the user paid for is persisted empty or not at
+   * all. Switching conversations while an answer was being written destroyed it.
+   *
+   * With this set, a cancel DETACHES instead: the upstream keeps being drained to
+   * completion so onFinish still fires and still writes the reply, and the user finds
+   * it waiting when they come back.
+   *
+   * The slot is deliberately NOT released at that point. Real work is still in flight,
+   * and releasing while it runs is the accounting failure this module's timeout
+   * comment already warns about. `timeoutMs` remains the outer bound.
+   */
+  continueOnCancel?: boolean;
 }
 
 /**
@@ -34,7 +52,7 @@ export function releaseOnStreamEnd(
   response: Response,
   options: StreamLifecycleOptions
 ): Response {
-  const { onSettled, timeoutMs = 0, onTimeout } = options;
+  const { onSettled, timeoutMs = 0, onTimeout, continueOnCancel = false } = options;
 
   if (!response.body) {
     onSettled();
@@ -82,8 +100,37 @@ export function releaseOnStreamEnd(
       }
     },
     cancel(reason) {
-      settle();
-      return reader.cancel(reason);
+      if (!continueOnCancel) {
+        settle();
+        return reader.cancel(reason);
+      }
+
+      /**
+       * The consumer left; the generation has not. Detach and keep reading.
+       *
+       * Bytes are discarded — nobody is listening for them — but reading is what
+       * drives the upstream to completion, and completion is what makes the SDK fire
+       * onFinish and persist the reply. Returning without cancelling is the whole
+       * point: `reader.cancel` here is exactly what used to kill the answer.
+       *
+       * `settle` runs only when the upstream genuinely ends, so the slot stays held
+       * for as long as real work continues. The timeout above is still armed and is
+       * what stops a wedged generation holding it forever.
+       */
+      void (async () => {
+        try {
+          for (;;) {
+            const { done } = await reader.read();
+            if (done) break;
+          }
+        } catch {
+          // A failed drain is still an ended generation as far as accounting goes.
+        } finally {
+          settle();
+        }
+      })();
+
+      return Promise.resolve();
     },
   });
 
