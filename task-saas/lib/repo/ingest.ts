@@ -4,6 +4,7 @@ import {
   fetchRepoMeta,
   fetchTarball,
   fetchTree,
+  ingestDeadline,
   GitHubError,
   isGitHubConfigured,
   type RepoRef,
@@ -52,6 +53,17 @@ export type IngestResult =
 export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
   const ingestStarted = Date.now();
 
+  /**
+   * One budget for the whole ingestion, shared by all four requests.
+   *
+   * Each request may now retry a transient failure and may wait out an imminent
+   * rate-limit reset. Bounded individually that is fine; bounded only individually,
+   * four of them compounding is minutes of wall-clock on an operation a user is
+   * waiting on. The deadline stops a new attempt from STARTING past it — work already
+   * in flight is allowed to finish.
+   */
+  const deadline = ingestDeadline(ingestStarted);
+
   if (!isGitHubConfigured()) {
     // 60 requests/hour unauthenticated cannot index anything real, and failing here is
     // clearer than failing partway through with a rate-limit error.
@@ -63,7 +75,7 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
 
   let meta;
   try {
-    meta = await fetchRepoMeta(ref);
+    meta = await fetchRepoMeta(ref, { deadline });
   } catch (error) {
     return { ok: false, error: describe(error) };
   }
@@ -100,7 +112,7 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
   });
 
   try {
-    const tree = await fetchTree(ref, meta.commitSha);
+    const tree = await fetchTree(ref, meta.commitSha, { deadline });
 
     /**
      * A truncated tree is a HARD FAILURE, never a warning.
@@ -155,7 +167,7 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
 
     if (language && supportsSymbols(language)) {
       try {
-        const stream = await fetchTarball(ref, meta.commitSha);
+        const stream = await fetchTarball(ref, meta.commitSha, { deadline });
         await readTarball(stream, (entry) => {
           if (!supportsSymbols(languageForPath(entry.path))) return;
           const symbols = extractSymbols(entry.content);

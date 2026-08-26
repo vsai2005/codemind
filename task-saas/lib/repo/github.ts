@@ -1,10 +1,12 @@
 import { logger } from "@/lib/logger";
 
 /**
- * The GitHub REST calls repository ingestion needs. Three endpoints, nothing more.
+ * The GitHub REST calls repository ingestion needs. Five, across four functions:
+ * repo, branch, tree and tarball for indexing, and contents for reading one file
+ * at query time.
  *
  * WHY NOT AN SDK
- * @octokit would bring a large dependency tree to wrap three endpoints we call with
+ * @octokit would bring a large dependency tree to wrap a handful of endpoints we call with
  * fixed shapes. Configuring it is more code than this file, and it would still need
  * the same timeout and rate-limit handling written around it.
  *
@@ -70,13 +72,94 @@ export type GitHubFailure =
   | { kind: "not_found" }
   | { kind: "rate_limited"; resetAt: number | null }
   | { kind: "too_large" }
-  | { kind: "unavailable"; detail: string };
+  /**
+   * `retryable` splits what this kind used to conflate.
+   *
+   * Every non-404, non-rate-limit response landed here — a 502 from GitHub's edge and
+   * a 401 from a revoked token were the same value. Retrying is right for the first
+   * and pure waste for the second, so the distinction has to be carried, not inferred
+   * later from a `detail` string.
+   */
+  | { kind: "unavailable"; detail: string; retryable: boolean };
 
 export class GitHubError extends Error {
   constructor(readonly failure: GitHubFailure, message: string) {
     super(message);
     this.name = "GitHubError";
   }
+}
+
+/**
+ * Statuses worth trying again. Everything absent from this set is a statement about
+ * the REQUEST — bad credentials, a malformed ref, a repository that is not there —
+ * and repeating it unchanged spends quota to receive the identical answer.
+ *
+ * 5xx is the transient family. 408 and 425 are the two 4xx that describe timing rather
+ * than the request itself.
+ */
+const RETRYABLE_STATUSES = new Set([408, 425, 500, 502, 503, 504]);
+
+/** Attempts per logical request, including the first. */
+const MAX_ATTEMPTS = 3;
+
+/** First backoff step; doubles per attempt before jitter. */
+const BASE_BACKOFF_MS = 500;
+
+/** Ceiling on a single backoff step, so exponential growth cannot run away. */
+const MAX_BACKOFF_MS = 4_000;
+
+/**
+ * How long a rate-limit reset may be waited out inline.
+ *
+ * GitHub's primary limit resets hourly. Waiting that out inside a request would hold a
+ * connection for the better part of an hour, so only a reset that is imminent is worth
+ * sleeping through; anything further is returned to the caller with the reset time so
+ * the user can be told WHEN to retry rather than only that it failed.
+ */
+const RATE_LIMIT_MAX_WAIT_MS = 20_000;
+
+/**
+ * Ceiling on total wall-clock for one ingestion, retries and rate-limit waits included.
+ *
+ * Ingestion is four requests regardless of repository size — repo, branch, tree,
+ * tarball — so this is not defending against a per-file loop; there isn't one during
+ * ingestion. It bounds the pathological case where every request retries to exhaustion
+ * and each waits out a near rate-limit reset, which is minutes of wall-clock for an
+ * operation the user is waiting on.
+ */
+export const INGEST_DEADLINE_MS = 90_000;
+
+export interface GitHubRequestOptions {
+  /**
+   * Absolute epoch-ms after which no further attempt may START. An in-flight request
+   * is allowed to finish; this bounds new work, not work already begun.
+   */
+  deadline?: number;
+  signal?: AbortSignal;
+}
+
+/** A deadline for one whole ingestion, to thread through its four requests. */
+export function ingestDeadline(now: number = Date.now()): number {
+  return now + INGEST_DEADLINE_MS;
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Exponential backoff with FULL jitter: a random point in [0, step], not step itself.
+ *
+ * Concurrent ingestions that fail together would otherwise retry in lockstep and
+ * rebuild the same spike that failed them. Randomising the whole interval spreads them
+ * rather than merely offsetting them.
+ */
+function backoffFor(attempt: number): number {
+  const step = Math.min(BASE_BACKOFF_MS * 2 ** (attempt - 1), MAX_BACKOFF_MS);
+  return Math.floor(Math.random() * step);
+}
+
+/** True when the failure is worth spending another attempt on. */
+function isRetryable(failure: GitHubFailure): boolean {
+  return failure.kind === "unavailable" && failure.retryable;
 }
 
 function token(): string | null {
@@ -135,7 +218,8 @@ export function parseRepoUrl(input: string): RepoRef | null {
   return { owner: owner.toLowerCase(), name: name.toLowerCase() };
 }
 
-async function githubFetch(path: string, accept = "application/vnd.github+json"): Promise<Response> {
+/** One attempt. Network failures become a retryable typed failure rather than a throw. */
+async function attemptFetch(path: string, accept: string, signal?: AbortSignal): Promise<Response> {
   const headers: Record<string, string> = {
     Accept: accept,
     "X-GitHub-Api-Version": "2022-11-28",
@@ -146,18 +230,148 @@ async function githubFetch(path: string, accept = "application/vnd.github+json")
   if (auth) headers.Authorization = `Bearer ${auth}`;
 
   const controller = new AbortController();
+  const onCallerAbort = (): void => controller.abort(signal?.reason);
+  if (signal) {
+    if (signal.aborted) controller.abort(signal.reason);
+    else signal.addEventListener("abort", onCallerAbort, { once: true });
+  }
+
   const timer = setTimeout(() => controller.abort(), GITHUB_TIMEOUT_MS);
 
   try {
     return await fetch(`${GITHUB_API}${path}`, { headers, signal: controller.signal });
   } catch (error) {
+    // A caller-initiated abort is not a GitHub problem and must not be retried —
+    // the work has been cancelled, so trying again would ignore that.
+    if (signal?.aborted) {
+      throw new GitHubError(
+        { kind: "unavailable", detail: "aborted", retryable: false },
+        "The request was cancelled."
+      );
+    }
+    // Everything else here is a transport failure: DNS, connection reset, or our own
+    // 15s timeout firing. All are worth another attempt.
     throw new GitHubError(
-      { kind: "unavailable", detail: error instanceof Error ? error.name : "fetch failed" },
+      { kind: "unavailable", detail: error instanceof Error ? error.name : "fetch failed", retryable: true },
       "Could not reach GitHub."
     );
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", onCallerAbort);
   }
+}
+
+/**
+ * A GitHub request, retried when — and only when — retrying could change the answer.
+ *
+ * Before this there was one attempt and a throw, so a single 502 from GitHub's edge
+ * failed an entire ingestion with nothing recoverable. Three things bound the retrying:
+ *
+ *   attempts   MAX_ATTEMPTS per logical request, so one endpoint cannot loop
+ *   deadline   an ingestion-wide budget, so four retrying requests cannot compound
+ *   kind       only `unavailable` with retryable:true — a 404 or a 401 never repeats
+ *
+ * Rate limiting is handled rather than merely reported: a reset that is imminent is
+ * slept through and retried, and one that is not is returned immediately carrying its
+ * reset time so the caller can say when to come back.
+ */
+async function githubFetch(
+  path: string,
+  accept = "application/vnd.github+json",
+  options: GitHubRequestOptions = {}
+): Promise<Response> {
+  const deadline = options.deadline;
+  let lastError: GitHubError | null = null;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    let response: Response;
+
+    try {
+      response = await attemptFetch(path, accept, options.signal);
+    } catch (error) {
+      const failure = error instanceof GitHubError ? error : null;
+      if (!failure || !isRetryable(failure.failure)) throw error;
+      lastError = failure;
+      if (!(await waitBeforeRetry(attempt, deadline, path, failure))) throw failure;
+      continue;
+    }
+
+    if (response.ok) return response;
+
+    const failure = classify(response);
+
+    // Rate limiting is its own decision: the wait is dictated by the reset header, not
+    // by backoff, and exhausting attempts against it would just burn them instantly.
+    if (failure.failure.kind === "rate_limited") {
+      const waitMs = rateLimitWaitMs(failure.failure.resetAt, deadline);
+      if (waitMs === null) throw failure;
+      logger.warn("GitHub rate limit hit; waiting for reset", {
+        path,
+        waitMs,
+        resetAt: failure.failure.resetAt,
+      });
+      await sleep(waitMs);
+      continue;
+    }
+
+    if (!isRetryable(failure.failure)) throw failure;
+    lastError = failure;
+    if (!(await waitBeforeRetry(attempt, deadline, path, failure))) throw failure;
+  }
+
+  throw (
+    lastError ??
+    new GitHubError(
+      { kind: "unavailable", detail: "retries_exhausted", retryable: false },
+      "GitHub could not be reached after several attempts. Try again shortly."
+    )
+  );
+}
+
+/**
+ * Sleep before the next attempt, or report that there must not be one.
+ *
+ * Returns false when the attempts are spent or the backoff would cross the deadline —
+ * sleeping up to a deadline only to refuse the attempt afterwards would spend the
+ * user's time to achieve nothing.
+ */
+async function waitBeforeRetry(
+  attempt: number,
+  deadline: number | undefined,
+  path: string,
+  failure: GitHubError
+): Promise<boolean> {
+  if (attempt >= MAX_ATTEMPTS) return false;
+
+  const waitMs = backoffFor(attempt);
+  if (deadline !== undefined && Date.now() + waitMs >= deadline) return false;
+
+  logger.debug("Retrying GitHub request", {
+    path,
+    attempt,
+    waitMs,
+    reason: failure.failure.kind === "unavailable" ? failure.failure.detail : failure.failure.kind,
+  });
+  await sleep(waitMs);
+  return true;
+}
+
+/**
+ * How long to wait for a rate-limit reset, or null when waiting is the wrong answer.
+ *
+ * Null for an unknown reset, one already past, one further out than
+ * RATE_LIMIT_MAX_WAIT_MS, or one that would cross the ingestion deadline. In every
+ * case the caller receives the typed failure with `resetAt` intact, which is what lets
+ * the user be told when to retry.
+ */
+function rateLimitWaitMs(resetAt: number | null, deadline: number | undefined): number | null {
+  if (resetAt === null) return null;
+
+  const waitMs = resetAt - Date.now();
+  if (waitMs <= 0 || waitMs > RATE_LIMIT_MAX_WAIT_MS) return null;
+  if (deadline !== undefined && Date.now() + waitMs >= deadline) return null;
+
+  return waitMs;
 }
 
 /**
@@ -185,33 +399,45 @@ function classify(response: Response): GitHubError {
     );
   }
 
+  // The split that makes retrying safe. A 502 is GitHub having a moment; a 401 is a
+  // revoked token and a 422 is a malformed ref, and repeating either spends quota to
+  // be told the same thing again.
+  const retryable = RETRYABLE_STATUSES.has(response.status);
+
   return new GitHubError(
-    { kind: "unavailable", detail: `http_${response.status}` },
-    "GitHub returned an unexpected response. Try again shortly."
+    { kind: "unavailable", detail: `http_${response.status}`, retryable },
+    retryable
+      ? "GitHub returned a temporary error. Try again shortly."
+      : "GitHub returned an unexpected response."
   );
 }
 
 /** Default branch and its head commit. One request. */
-export async function fetchRepoMeta(ref: RepoRef): Promise<RepoMeta> {
-  const response = await githubFetch(`/repos/${ref.owner}/${ref.name}`);
+export async function fetchRepoMeta(
+  ref: RepoRef,
+  options: GitHubRequestOptions = {}
+): Promise<RepoMeta> {
+  const response = await githubFetch(`/repos/${ref.owner}/${ref.name}`, undefined, options);
   if (!response.ok) throw classify(response);
 
   const body = (await response.json()) as { default_branch?: unknown };
   const defaultBranch = typeof body.default_branch === "string" ? body.default_branch : null;
   if (!defaultBranch) {
-    throw new GitHubError({ kind: "unavailable", detail: "no_default_branch" }, "GitHub returned an unexpected response.");
+    throw new GitHubError({ kind: "unavailable", detail: "no_default_branch", retryable: false }, "GitHub returned an unexpected response.");
   }
 
   // The branch ref resolves to the commit this snapshot is pinned to.
   const branch = await githubFetch(
-    `/repos/${ref.owner}/${ref.name}/branches/${encodeURIComponent(defaultBranch)}`
+    `/repos/${ref.owner}/${ref.name}/branches/${encodeURIComponent(defaultBranch)}`,
+    undefined,
+    options
   );
   if (!branch.ok) throw classify(branch);
 
   const branchBody = (await branch.json()) as { commit?: { sha?: unknown } };
   const commitSha = typeof branchBody.commit?.sha === "string" ? branchBody.commit.sha : null;
   if (!commitSha) {
-    throw new GitHubError({ kind: "unavailable", detail: "no_commit_sha" }, "GitHub returned an unexpected response.");
+    throw new GitHubError({ kind: "unavailable", detail: "no_commit_sha", retryable: false }, "GitHub returned an unexpected response.");
   }
 
   return { defaultBranch, commitSha };
@@ -224,9 +450,15 @@ export async function fetchRepoMeta(ref: RepoRef): Promise<RepoMeta> {
  * `truncated` is passed through untouched for the caller to reject; swallowing it here
  * would produce exactly the silently-partial index this feature must not have.
  */
-export async function fetchTree(ref: RepoRef, commitSha: string): Promise<RepoTree> {
+export async function fetchTree(
+  ref: RepoRef,
+  commitSha: string,
+  options: GitHubRequestOptions = {}
+): Promise<RepoTree> {
   const response = await githubFetch(
-    `/repos/${ref.owner}/${ref.name}/git/trees/${commitSha}?recursive=1`
+    `/repos/${ref.owner}/${ref.name}/git/trees/${commitSha}?recursive=1`,
+    undefined,
+    options
   );
   if (!response.ok) throw classify(response);
 
@@ -265,12 +497,17 @@ export async function fetchTree(ref: RepoRef, commitSha: string): Promise<RepoTr
  */
 export async function fetchTarball(
   ref: RepoRef,
-  commitSha: string
+  commitSha: string,
+  options: GitHubRequestOptions = {}
 ): Promise<ReadableStream<Uint8Array>> {
-  const response = await githubFetch(`/repos/${ref.owner}/${ref.name}/tarball/${commitSha}`);
+  const response = await githubFetch(
+    `/repos/${ref.owner}/${ref.name}/tarball/${commitSha}`,
+    undefined,
+    options
+  );
   if (!response.ok) throw classify(response);
   if (!response.body) {
-    throw new GitHubError({ kind: "unavailable", detail: "empty_archive" }, "GitHub returned an empty archive.");
+    throw new GitHubError({ kind: "unavailable", detail: "empty_archive", retryable: false }, "GitHub returned an empty archive.");
   }
   return response.body;
 }
