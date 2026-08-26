@@ -87,8 +87,20 @@ ${COMMON_RULES}`;
   }
 }
 
+/**
+ * Tokens a provider reported for one generation.
+ *
+ * Null per field means the provider did not report, never zero — the same contract
+ * Message.promptTokens carries, kept identical so a value can travel from here to the
+ * column without a translation step that could invent a number.
+ */
+export interface ArtifactUsage {
+  promptTokens: number | null;
+  completionTokens: number | null;
+}
+
 export type ArtifactGeneration =
-  | { ok: true; artifact: NormalizedArtifact; summary: string }
+  | { ok: true; artifact: NormalizedArtifact; summary: string; usage: ArtifactUsage }
   | { ok: false; errors: string[] };
 
 export interface GenerateArtifactOptions {
@@ -107,6 +119,20 @@ export interface GenerateArtifactOptions {
    */
   contextPrompt?: string;
   signal?: AbortSignal;
+}
+
+/**
+ * A count only when the provider actually reported one.
+ *
+ * Mirrors toTokenCount in app/api/chat/route.ts deliberately rather than importing it:
+ * that one lives in a Next route module, which may only export HTTP handlers. The
+ * guard matters because @ai-sdk/openai seeds usage as NaN and replaces it only on a
+ * usage chunk, and NaN into an Int column is a write error rather than a null.
+ */
+function toReportedCount(value: number | undefined | null): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.round(value)
+    : null;
 }
 
 function defaultSummary(artifact: NormalizedArtifact): string {
@@ -131,6 +157,11 @@ export async function generateArtifact(
 
   let output: string;
   let finishReason: string;
+  // Captured here because this is the only place holding the provider's response.
+  // It used to be discarded, so an artifact turn persisted with no token record at
+  // all while the streaming path recorded its own — the same conversation reporting
+  // two different truths depending on which branch answered.
+  let usage: ArtifactUsage = { promptTokens: null, completionTokens: null };
 
   try {
     const result = await generateText({
@@ -145,6 +176,10 @@ export async function generateArtifact(
     });
     output = result.text;
     finishReason = result.finishReason;
+    usage = {
+      promptTokens: toReportedCount(result.usage?.promptTokens),
+      completionTokens: toReportedCount(result.usage?.completionTokens),
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : "unknown error";
     // Scrubbed because this string is logged, streamed to the browser, AND persisted
@@ -178,5 +213,6 @@ export async function generateArtifact(
     ok: true,
     artifact: validation.artifact,
     summary: parsed.summary ?? defaultSummary(validation.artifact),
+    usage,
   };
 }

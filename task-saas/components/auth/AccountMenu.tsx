@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { AccountUsage } from "@/components/auth/AccountUsage";
 import { signOut, useSession } from "next-auth/react";
 
 /**
@@ -65,6 +66,13 @@ export function AccountMenu(): React.ReactElement {
               <p className="truncate text-[11px] text-gray-500">{user.email}</p>
             )}
           </div>
+
+          {/*
+            Lifetime totals. Rendered only while the menu is open so a sidebar that is
+            always mounted does not aggregate on every page load — the query is cheap
+            per call, but it is not free per navigation.
+          */}
+          <AccountUsage />
           <button
             type="button"
             role="menuitem"

@@ -1220,7 +1220,7 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
         originalRawContent,
         generation.summary,
         { artifact: generation.artifact, byteSize: body.byteLength, userId },
-        { provider, model: providerModelId, plan }
+        { provider, model: providerModelId, plan, usage: generation.usage }
       );
 
       writer.progress("ready", "Your download is ready.");
@@ -1253,7 +1253,17 @@ async function persistTurn(
   userContent: string,
   visibleText: string,
   artifactData: { artifact: NormalizedArtifact; byteSize: number; userId: string } | null,
-  origin?: { provider: string; model: string; plan?: ChatPlan | null }
+  origin?: {
+    provider: string;
+    model: string;
+    plan?: ChatPlan | null;
+    /**
+     * Provider-reported usage for the generation that produced `visibleText`.
+     * Null per field means not reported — never zero. Omitted entirely by callers
+     * that had no generation to measure, such as a failure notice.
+     */
+    usage?: { promptTokens: number | null; completionTokens: number | null };
+  }
 ): Promise<{ id: string } | null> {
   await prisma.message.create({
     data: { conversationId, role: "user", content: userContent },
@@ -1267,6 +1277,10 @@ async function persistTurn(
       provider: origin?.provider ?? null,
       model: origin?.model ?? null,
       plan: origin?.plan ? (origin.plan as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
+      // ?? null rather than a default: an absent `usage` and a reported zero must not
+      // collapse into the same stored value.
+      promptTokens: origin?.usage?.promptTokens ?? null,
+      completionTokens: origin?.usage?.completionTokens ?? null,
     },
   });
 

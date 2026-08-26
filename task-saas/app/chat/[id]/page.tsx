@@ -6,6 +6,7 @@ import { ChatMessage } from "@/components/chat/ChatMessage";
 import { Composer } from "@/components/chat/Composer";
 import { ThinkingIndicator } from "@/components/chat/ThinkingIndicator";
 import { ModelSelector } from "@/components/chat/ModelSelector";
+import { TokenUsage } from "@/components/chat/TokenUsage";
 import { ChatError } from "@/components/chat/ChatError";
 import { ProjectSwitcher } from "@/components/projects/ProjectSwitcher";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -196,6 +197,15 @@ export default function ChatPage() {
             CodeMind Workspace
           </h1>
           <div className="flex items-center gap-2">
+            {/*
+              Beside the model selector because the two are read together: which model
+              answered, and what it cost in tokens. isLoading drives the refetch — the
+              total is only meaningful once a turn has settled and its usage is stored.
+            */}
+            <TokenUsage
+              conversationId={typeof params.id === "string" ? params.id : null}
+              isStreaming={isLoading}
+            />
             <ProjectSwitcher activeProjectId={projectId} />
             <ModelSelector value={modelId} onChange={setModelId} disabled={isLoading} />
           </div>
