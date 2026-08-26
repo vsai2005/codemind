@@ -3,6 +3,7 @@ import { ATTACHMENT_TAG_RE } from "@/lib/attachments";
 import { getContextTokenLimit, getOutputTokenLimit } from "@/lib/env";
 import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 import { mentionsFileDelivery } from "@/lib/ai/intent";
+import { logger } from "@/lib/logger";
 
 /**
  * Context Management V3
@@ -18,18 +19,20 @@ import { mentionsFileDelivery } from "@/lib/ai/intent";
  */
 
 /**
- * Flat reserve for the static persona layers, built by buildSystemPrompt in
- * lib/ai/system-prompt.ts.
+ * CEILING for the static persona layers — an assertion, NOT what the budget subtracts.
  *
- * Sized for the WORST case rather than the typical one, because this is subtracted
- * before anything about the turn is known. Two of those layers are now conditional, so
- * the range is wide: a plain chat turn assembles ~191 tokens, while a repo-backed
- * request that also mentions a file reaches ~494. The reserve has to cover the top of
- * that range; requests below it simply leave the difference to the conversation
- * budget, which is the direction that cannot break anything.
+ * It was the subtraction until the prompt's layers became conditional, at which point
+ * a fixed figure stopped being defensible in either direction. Sized to the typical
+ * turn it would under-reserve the worst one; sized to the worst turn (494) it charged
+ * every plain question 291 tokens it never spent, which made the common case worse
+ * than the flat 400 that came before conditional assembly. `buildContext` now measures
+ * the layers it actually selected and subtracts that.
  *
- * Mirrored as STATIC_PROMPT_TOKEN_BUDGET, where per-layer ceilings pin down which
- * layer grew. Keep the two numbers in step.
+ * What this still does is bound the measurement. Nothing enforces that a future layer
+ * edit keeps the prompt small, and a prompt that quietly grew would now quietly shrink
+ * the conversation window instead of tripping a fixed reserve. Exceeding this is a bug
+ * — buildSystemPrompt warns, and the per-layer ceilings in STATIC_PROMPT_TOKEN_BUDGET
+ * name which layer grew. Keep the two numbers in step.
  */
 const SYSTEM_PROMPT_RESERVE = 520;
 
@@ -393,8 +396,59 @@ export class ContextManager {
     const safetyMargin = Math.ceil(maxContext * SAFETY_MARGIN_RATIO);
     const imageHeadroom = options.hasImage ? IMAGE_HEADROOM_TOKENS : 0;
 
+    /**
+     * The query string is needed HERE, before any budgeting, because the size of the
+     * system prompt depends on it. It reads only `newUserMessage`, so hoisting it
+     * above the attachment pass below changes nothing about what it produces.
+     */
+    const queryStr =
+      typeof newUserMessage.content === "string"
+        ? newUserMessage.content
+        : JSON.stringify(newUserMessage.content);
+
+    /**
+     * Charge the prompt this turn ACTUALLY assembles, not a fixed worst case.
+     *
+     * Two of the prompt's layers are conditional, so its cost ranges from 203 tokens
+     * for a plain question to 494 for a repo-backed request that also mentions a file.
+     * Subtracting the 494 ceiling from every turn would hand the conditional layers'
+     * saving to nobody: the plain question would build a 203-token prompt and still
+     * reserve 494, leaving the common case worse off than the flat 400 that preceded
+     * conditional assembly. Measuring instead returns the difference to the
+     * conversation.
+     *
+     * REPOSITORY GROUNDING IS RESERVED OPTIMISTICALLY. Whether that layer is included
+     * at assembly depends on whether any repository file survived budgeting, which is
+     * not knowable until after this budget exists. So the reserve uses the input list
+     * — an upper bound — while assembly uses the rendered block. The two agree except
+     * when files were supplied and every one was priced out, where this over-reserves
+     * by the grounding layer. That is the safe direction: a slightly smaller
+     * conversation budget, never a prompt larger than the window allowed for.
+     */
+    const includeArtifactRules = mentionsFileDelivery(queryStr);
+    const mayHaveRepositoryContext = (options.repositoryFiles?.length ?? 0) > 0;
+
+    // buildSystemPrompt with no contextBlocks IS the static prompt — the same function
+    // that assembles the real one, so the measurement cannot drift from what is sent.
+    const staticPromptTokens = estimateTokens(
+      buildSystemPrompt({
+        hasRepositoryContext: mayHaveRepositoryContext,
+        includeArtifactRules,
+      })
+    );
+
+    // The ceiling is an assertion, not a floor: charge what was measured even when it
+    // overruns, since under-charging is what pushes a request past the provider limit.
+    // buildSystemPrompt has already warned by this point, naming the guilty layer.
+    if (staticPromptTokens > SYSTEM_PROMPT_RESERVE) {
+      logger.warn("Static system prompt exceeded its documented ceiling", {
+        staticPromptTokens,
+        ceiling: SYSTEM_PROMPT_RESERVE,
+      });
+    }
+
     const totalBudget =
-      maxContext - maxOutput - SYSTEM_PROMPT_RESERVE - safetyMargin - imageHeadroom;
+      maxContext - maxOutput - staticPromptTokens - safetyMargin - imageHeadroom;
     let budget = totalBudget;
 
     // --- 1. Extract attachments from history so they do not bloat the window ------
@@ -439,10 +493,8 @@ export class ContextManager {
       });
     }
 
-    const queryStr =
-      typeof newUserMessage.content === "string"
-        ? newUserMessage.content
-        : JSON.stringify(newUserMessage.content);
+    // queryStr is computed above, before the budget, because the prompt's size
+    // depends on it.
     const terms = queryTerms(queryStr);
 
     // --- 2. Current request has absolute priority --------------------------------
@@ -729,16 +781,17 @@ ${file.content}`;
     //                  the RENDERED block, not options.repositoryFiles — a file list
     //                  that was passed in but priced out leaves nothing for the model
     //                  to cite, and grounding rules pointing at an absent block are
-    //                  the confusing case they are meant to prevent.
-    //   artifact rules dropped only when the user's own words show no sign of wanting
-    //                  a file. mentionsFileDelivery is over-inclusive on purpose; see
-    //                  the note there. This is the ONLY place that may pass false.
+    //                  the confusing case they are meant to prevent. The budget above
+    //                  reserved against the input list instead, which can only
+    //                  over-reserve; see the note there.
+    //   artifact rules decided from the user's own words, and computed with the budget
+    //                  above so the prompt that was priced is the prompt that is built.
     const hasRepositoryContext = contextBlocks.includes("--- REPOSITORY FILES ---");
 
     const systemPrompt = buildSystemPrompt({
       contextBlocks,
       hasRepositoryContext,
-      includeArtifactRules: mentionsFileDelivery(queryStr),
+      includeArtifactRules,
     });
 
     const used = totalBudget - budget;

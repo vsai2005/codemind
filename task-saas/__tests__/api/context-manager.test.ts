@@ -91,13 +91,17 @@ describe("ContextManager.buildContext", () => {
 
   describe("coherent turn windowing", () => {
     it("drops whole USER→ASSISTANT turns, never an orphaned half", () => {
-      // Sized so the older turn cannot fit but the newer one can. Tracks
-      // SYSTEM_PROMPT_RESERVE: the window must clear reserve + output + margin
-      // before any history fits at all — so this figure moves with the reserve
-      // (740 = the old 620 plus the 400->520 increase when the rule layers
-      // became conditional), keeping the effective budget the scenario sees
-      // unchanged.
-      process.env.AI_CONTEXT_MAX_TOKENS = "740";
+      // Sized so the older turn cannot fit but the newer one can — the window has
+      // to clear the system prompt + output + margin before any history fits.
+      //
+      // This figure no longer tracks a constant. buildContext now subtracts the
+      // prompt it actually assembles, which depends on the user message: "q"
+      // mentions no file, so the artifact rules are dropped and the prompt costs
+      // 203 rather than the 494 worst case. Change that message to something
+      // mentioning a file and the budget shrinks by ~177 tokens under this test's
+      // feet. The assertions below fail loudly if that happens, which is why the
+      // literal is safe to keep.
+      process.env.AI_CONTEXT_MAX_TOKENS = "417";
       process.env.AI_MAX_OUTPUT_TOKENS = "100";
 
       const historical = [
@@ -121,7 +125,7 @@ describe("ContextManager.buildContext", () => {
 
     it("keeps the retained window contiguous", () => {
       // Sized so the huge middle turn cannot fit, stranding everything older.
-      process.env.AI_CONTEXT_MAX_TOKENS = "740";
+      process.env.AI_CONTEXT_MAX_TOKENS = "417";
       process.env.AI_MAX_OUTPUT_TOKENS = "100";
 
       const historical = [
@@ -366,6 +370,34 @@ describe("ContextManager.buildContext", () => {
       expect(promptFor()).toMatch(/give me this as a PDF/i);
     });
 
+    /**
+     * The saving from conditional layers has to reach the CONVERSATION, not just the
+     * prompt string.
+     *
+     * While the budget subtracted a fixed worst-case reserve, making layers optional
+     * shrank the prompt and changed nothing else: a plain question built a 203-token
+     * prompt and was still charged 494. This asserts the two now move together.
+     */
+    it("gives a plain question a larger conversation budget than a repo+file turn", () => {
+      process.env.AI_CONTEXT_MAX_TOKENS = "50000";
+      process.env.AI_MAX_OUTPUT_TOKENS = "1000";
+
+      const plain = ContextManager.buildContext(
+        [],
+        { id: "p", role: "user", content: "why is my test failing" } as any,
+        null
+      );
+
+      const repoAndFile = ContextManager.buildContext(
+        [],
+        { id: "r", role: "user", content: "give me session.ts as a pdf" } as any,
+        null,
+        { repositoryFiles: [{ path: "src/session.ts", content: "export const a = 1;" }] }
+      );
+
+      expect(plain.pressure.total).toBeGreaterThan(repoAndFile.pressure.total);
+    });
+
     it("fits inside the reserve the budget subtracts for it", () => {
       // Under-reserving surfaces as an occasional context overflow rather than an
       // obvious error, so this guards the number rather than trusting it.
@@ -382,7 +414,7 @@ describe("ContextManager.buildContext", () => {
      * configured context limit.
      */
     it("does not exceed the budget when the current message has consumed it", () => {
-      process.env.AI_CONTEXT_MAX_TOKENS = "4120";
+      process.env.AI_CONTEXT_MAX_TOKENS = "3750";
       process.env.AI_MAX_OUTPUT_TOKENS = "200";
 
       // Sized so the message fits (≈3,234 of a ≈3,317-token budget) but leaves LESS
@@ -402,6 +434,23 @@ describe("ContextManager.buildContext", () => {
           ],
         }
       );
+
+      /**
+       * The premise, asserted rather than described.
+       *
+       * This scenario only means anything while the room left after the message is
+       * SMALLER than the share each block is allowed to claim — that mismatch is the
+       * bug it was written for. When buildContext started subtracting the measured
+       * prompt instead of a fixed reserve, the budget grew by ~317 tokens and the
+       * remainder quietly became larger than the cap: every assertion below still
+       * passed, against a scenario that no longer reproduced anything.
+       *
+       * Checking the premise means the next change to prompt size fails here loudly
+       * instead of hollowing the test out in silence.
+       */
+      const remainder = result.pressure.total - estimateTokens(nearlyFull);
+      expect(remainder).toBeGreaterThan(0); // the message still fits
+      expect(remainder).toBeLessThan(Math.floor(result.pressure.total * 0.05));
 
       expect(result.pressure.used).toBeLessThanOrEqual(result.pressure.total);
       expect(
