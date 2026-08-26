@@ -93,26 +93,34 @@ export const DEFAULT_CAPABILITY_PROFILE: CapabilityProfile = {
  * Per-layer ceilings, each measured on that layer in isolation.
  *
  * These exist so an edit that inflates one layer fails a test naming that layer,
- * instead of a single whole-prompt assertion that only says "the prompt got too
- * big". Each is the measured size (identity 40, capabilities 71, guardrails 304)
- * plus headroom for rewording.
+ * instead of a single whole-prompt assertion that only says "the prompt got too big".
+ *
+ * SIZED TIGHT — measured + ~10%, not a round number well clear of reality. They were
+ * generous once (artifactRules allowed 230 against a measured 176) and that slack was
+ * a real hole: since buildContext began subtracting the MEASURED prompt rather than a
+ * fixed reserve, a layer that grew inside its allowance no longer trips anything at
+ * all. It just quietly takes the tokens out of the conversation window, which is worse
+ * than the fixed reserve it replaced — that at least failed loudly. These ceilings are
+ * now the only thing that notices, so they are set close enough to notice.
+ *
+ * Measured at the time of writing: identity 40, capabilities 71, guardrails 307,
+ * grounding 114, outputContract 106, artifactRules 176.
  *
  * Deliberately NOT summed into the whole-prompt budget. estimateTokens is
- * content-aware: it picks a divisor from punctuation density, so the dense guardrail
- * layer scores higher alone (304) than it does diluted by the prose layers, and the
- * per-layer figures add to 415 while the assembled prompt measures 377. Summing them
- * would assert an invariant the estimator does not actually hold.
+ * content-aware: it picks a divisor from punctuation density, so a dense layer scores
+ * higher alone than it does diluted by the prose layers. Summing them would assert an
+ * invariant the estimator does not actually hold.
  */
 export const LAYER_TOKEN_BUDGETS = {
-  identity: 55,
-  capabilities: 95,
-  guardrails: 330,
+  identity: 45,
+  capabilities: 78,
+  guardrails: 338,
   /** Repository grounding. Only paid when source files are attached. */
-  grounding: 130,
+  grounding: 126,
   /** The tool-call prohibition. Unconditional, so this is the floor for every turn. */
-  outputContract: 130,
+  outputContract: 117,
   /** Artifact and download rules. Dropped when the user mentions no file at all. */
-  artifactRules: 230,
+  artifactRules: 194,
 } as const;
 
 /**

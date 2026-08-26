@@ -7,6 +7,7 @@ import {
   estimateTokens,
   type RetrievalMessage,
 } from "@/lib/ai/context-manager";
+import { buildSystemPrompt } from "@/lib/ai/system-prompt";
 
 function restoreEnv(): void {
   delete process.env.AI_CONTEXT_MAX_TOKENS;
@@ -396,6 +397,63 @@ describe("ContextManager.buildContext", () => {
       );
 
       expect(plain.pressure.total).toBeGreaterThan(repoAndFile.pressure.total);
+    });
+
+    /**
+     * The optimistic-reservation direction, pinned.
+     *
+     * The grounding layer is reserved from the INPUT file list, before budgeting, but
+     * assembled from the RENDERED block, after it. When files are supplied and every
+     * one is priced out, the two disagree — and the disagreement has to fall on the
+     * over-reserve side. Over-reserving costs a slightly smaller conversation; under-
+     * reserving builds a prompt larger than the window was sized for, which is the
+     * failure this whole budget exists to prevent.
+     *
+     * Nothing in the types enforces the direction, so it is asserted here. If a future
+     * change inverts it — reserving from the rendered block, or assembling from the
+     * input list — this goes red rather than shipping a window that can overflow.
+     */
+    it("over-reserves rather than under-reserves when repository files are priced out", () => {
+      const maxContext = 900;
+      const maxOutput = 100;
+      process.env.AI_CONTEXT_MAX_TOKENS = String(maxContext);
+      process.env.AI_MAX_OUTPUT_TOKENS = String(maxOutput);
+
+      // Large enough that nothing is left for the repository block once the message is
+      // paid for, small enough not to overflow the window on its own.
+      const message = "z".repeat(1300);
+
+      const result = ContextManager.buildContext(
+        [],
+        { id: "n", role: "user", content: message } as any,
+        null,
+        { repositoryFiles: [{ path: "src/session.ts", content: "export function createSession() { return 1; }" }] }
+      );
+
+      // Preconditions. Without these the assertion below is vacuous: it would be
+      // comparing a reserve against an assembly that happened to agree with it.
+      expect(result.contextBlocks).not.toContain("--- REPOSITORY FILES ---");
+      expect(result.systemPrompt).not.toContain("Cite a path only");
+
+      // What buildContext charged: everything the window lost that was not output,
+      // safety margin, or the conversation itself.
+      const safetyMargin = Math.ceil(maxContext * 0.02);
+      const charged = maxContext - maxOutput - safetyMargin - result.pressure.total;
+
+      // What the prompt actually cost, grounding excluded because it was not rendered.
+      // "z" repeated mentions no file, so the artifact rules are off in both figures.
+      const assembled = estimateTokens(
+        buildSystemPrompt({ hasRepositoryContext: false, includeArtifactRules: false })
+      );
+
+      expect(charged).toBeGreaterThanOrEqual(assembled);
+
+      // And specifically by the grounding layer — proving the gap is the reservation
+      // being optimistic, not some unrelated slack that happens to be positive.
+      const withGrounding = estimateTokens(
+        buildSystemPrompt({ hasRepositoryContext: true, includeArtifactRules: false })
+      );
+      expect(charged).toBe(withGrounding);
     });
 
     it("fits inside the reserve the budget subtracts for it", () => {
