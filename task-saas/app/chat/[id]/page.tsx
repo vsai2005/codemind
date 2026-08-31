@@ -72,6 +72,8 @@ export default function ChatPage() {
    * was never lost; it was invisible.
    */
   const [pendingSince, setPendingSince] = useState<string | null>(null);
+  /** See the error-ownership effect below. Null means "no error to show here". */
+  const [errorForId, setErrorForId] = useState<string | null>(null);
 
   const loadConversation = useCallback(async (): Promise<StoredMessage[] | null> => {
     const res = await fetch(`/api/conversations/${params.id}`);
@@ -81,24 +83,6 @@ export default function ChatPage() {
     setPendingSince(typeof data?.pendingSince === "string" ? data.pendingSince : null);
     return Array.isArray(data?.messages) ? (data.messages as StoredMessage[]) : null;
   }, [params.id]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    void loadConversation()
-      .then((stored) => {
-        if (cancelled) return;
-        if (stored) setInitialMessages(stored.map(toMessage));
-        setLoading(false);
-      })
-      .catch(() => {
-        if (!cancelled) setLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [loadConversation]);
 
   /**
    * The text of the turn currently in flight.
@@ -137,6 +121,83 @@ export default function ChatPage() {
   });
 
   /**
+   * Latest-value refs for useChat's setters.
+   *
+   * The load effect below must not re-run when these change identity, or setLoading(true)
+   * inside it would trigger the render that changes them again. Reading them through a
+   * ref keeps the effect keyed on the conversation and nothing else.
+   */
+  const setMessagesRef = useRef(setMessages);
+  setMessagesRef.current = setMessages;
+  const setDataRef = useRef(setData);
+  setDataRef.current = setData;
+
+  /**
+   * Load the conversation, and RESET what the previous one left behind.
+   *
+   * Next reuses this component across /chat/[id] navigations — same route, different
+   * param — so every piece of state here survives a conversation switch unless it is
+   * explicitly cleared. Without these resets, switching showed the previous
+   * conversation's transcript, its "Generation stopped" line and its progress parts
+   * until the new fetch resolved. That is milliseconds on localhost and long enough to
+   * read on a slow connection, and it is wrong for the whole of it.
+   *
+   * `loading` returning to true is what puts the spinner up in place of stale content.
+   * A brief spinner is the right failure here: showing one conversation's replies
+   * underneath another conversation's title is worse than showing nothing.
+   *
+   * setMessages is needed as well as setInitialMessages because useChat keeps its own
+   * copy once a turn has been sent, and stops tracking the initialMessages prop.
+   */
+  useEffect(() => {
+    let cancelled = false;
+
+    setLoading(true);
+    setPendingSince(null);
+    setStopped(false);
+    setErrorForId(null);
+    setDataRef.current([]);
+    setMessagesRef.current([]);
+
+    void loadConversation()
+      .then((stored) => {
+        if (cancelled) return;
+        if (stored) {
+          const mapped = stored.map(toMessage);
+          setInitialMessages(mapped);
+          setMessagesRef.current(mapped);
+        }
+        setLoading(false);
+      })
+      .catch(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [loadConversation]);
+
+  /**
+   * Which conversation the current useChat error belongs to.
+   *
+   * useChat exposes no way to clear `error`, and the hook instance survives navigation,
+   * so a failure in one conversation would otherwise keep its banner on screen in the
+   * next one — an error message about a message that is not even displayed.
+   *
+   * Recorded on the TRANSITION to a new error, not whenever `error` is truthy: the
+   * latter would re-tag the stale error with the new conversation's id on arrival,
+   * which is precisely the bug.
+   */
+  const previousErrorRef = useRef(error);
+  useEffect(() => {
+    if (error && error !== previousErrorRef.current) {
+      setErrorForId(typeof params.id === "string" ? params.id : null);
+    }
+    previousErrorRef.current = error;
+  }, [error, params.id]);
+
+  /**
    * Watch for a reply being written by a generation this page is not streaming.
    *
    * Only runs when the server reported one pending AND useChat is not itself
@@ -161,7 +222,7 @@ export default function ChatPage() {
           // Replace wholesale rather than appending: the reply may arrive with plan and
           // artifact annotations attached, and toMessage is what rebuilds those into
           // the same shape the live stream produces.
-          if (answered) setMessages(stored.map(toMessage));
+          if (answered) setMessagesRef.current(stored.map(toMessage));
         })
         .catch(() => {
           // A failed poll is not a failed generation. Leave the indicator up and try
@@ -173,7 +234,10 @@ export default function ChatPage() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [pendingSince, isLoading, loadConversation, setMessages]);
+    // setMessages is reached through a ref, not a dependency: listing it would rebuild
+    // the interval on any render that changed its identity, and an interval rebuilt
+    // more often than its own period never fires at all.
+  }, [pendingSince, isLoading, loadConversation]);
 
   // Progress parts accumulate across turns; clear them when a new turn starts.
   const submit = useCallback(
@@ -287,7 +351,7 @@ export default function ChatPage() {
             )}
             {/* Sits where the reply would have been, so the failure lands where the
                 user is already looking rather than in a corner. */}
-            {error && !isLoading && (
+            {error && errorForId === params.id && !isLoading && (
               <ChatError error={error} onRetry={retryLastMessage} disabled={isLoading} />
             )}
           </div>
