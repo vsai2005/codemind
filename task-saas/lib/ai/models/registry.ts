@@ -52,6 +52,29 @@ const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
  */
 const DEEPSEEK_MAX_OUTPUT_TOKENS = 16_384;
 
+/**
+ * Kimi K3 emits a reasoning pass before its answer — responses carry a separate
+ * `reasoning_content` field, and those tokens are billed against the same output budget
+ * as the visible reply. Same argument as DeepSeek above: an 8k ceiling risks the answer
+ * being truncated by the model's own thinking. NVIDIA's own sample for this model uses
+ * 16,384, which is also where AI_MAX_OUTPUT_TOKENS sits, so nothing here is speculative.
+ */
+const KIMI_K3_MAX_OUTPUT_TOKENS = 16_384;
+
+/**
+ * MEASURED, not advertised. NVIDIA's /v1/models returns no context metadata for this
+ * model and the endpoint accepts any max_tokens without complaint, so the window was
+ * established by probing: a 546,087-token prompt was accepted and answered on
+ * 2026-08-31. It was not probed higher.
+ *
+ * 524,288 is that measurement rounded down to a power of two. It is deliberately NOT
+ * FRONTIER_CONTEXT_TOKENS: the other entries there use a figure the provider publishes,
+ * and claiming 1M for this model would be asserting something no one has checked. The
+ * distinction is free today — CODEMIND_TARGET_CONTEXT_TOKENS caps sends at 512,000
+ * either way — but it stops being free the moment an operator raises that ceiling.
+ */
+const KIMI_K3_CONTEXT_TOKENS = 524_288;
+
 /** Fallback when NVIDIA_VISION_MODEL is unset. Mirrors lib/ai/gateway.ts. */
 const DEFAULT_NVIDIA_VISION_MODEL = "meta/llama-3.2-90b-vision-instruct";
 
@@ -78,6 +101,29 @@ function buildRegistry(): ModelDescriptor[] {
       supportsStreaming: true,
       supportsVision: false,
       strengths: ["Long Context", "Coding", "Reasoning"],
+      enabled: true,
+    },
+    {
+      id: "kimi-k3",
+      displayName: process.env.KIMI_DISPLAY_NAME || "Kimi K3",
+      // Served over NVIDIA's integrate API, so it rides the SAME adapter and the same
+      // NVIDIA_API_KEY_1..5 pool as Nemotron — multi-key scheduling, cooldowns and
+      // failover included, with no new credential to configure. This is why it is not
+      // a separate provider the way DeepSeek is: DeepSeek shares the host but is billed
+      // to a different account, and Kimi is not.
+      provider: "nvidia",
+      providerLabel: "NVIDIA",
+      providerModelId: process.env.KIMI_MODEL || "moonshotai/kimi-k3",
+      providerContextTokens: KIMI_K3_CONTEXT_TOKENS,
+      maxOutputTokens: KIMI_K3_MAX_OUTPUT_TOKENS,
+      supportsStreaming: true,
+      // Verified against the live endpoint on 2026-08-31, not inferred from a catalog
+      // listing: an image_url message was sent and correctly described. That matters
+      // because supportsVision drives real routing — declaring it wrongly either sends
+      // images to a model that cannot read them, or diverts them to the NVIDIA vision
+      // model and throws away this model's own reasoning about the picture.
+      supportsVision: true,
+      strengths: ["Long Context", "Multimodal", "Reasoning"],
       enabled: true,
     },
     {
