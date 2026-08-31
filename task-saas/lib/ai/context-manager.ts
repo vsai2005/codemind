@@ -385,6 +385,15 @@ export interface BuildContextOptions {
    * there is no room.
    */
   repositoryFiles?: Array<{ path: string; content: string }>;
+  /**
+   * Stated when the repository could not be read for this turn.
+   *
+   * Rendered even though `repositoryFiles` is empty, which is the whole point: an
+   * absent block and a failed read look identical to a model, and it will answer
+   * confidently in both cases. This is the same honesty rule the index applies to
+   * unsupported languages — report the gap rather than let silence imply coverage.
+   */
+  repositoryNote?: string;
 }
 
 export interface BuildContextResult {
@@ -612,6 +621,20 @@ Durable facts about this project:
     // as a complete file, which is how a confident answer about a function that was
     // truncated away happens. Clamping applies only to a single file that cannot fit on
     // its own, where the alternative is showing nothing of it.
+    // A failure notice with no files. Deliberately its own branch: it must render when
+    // there is nothing to render beside it.
+    if (options.repositoryNote && (!options.repositoryFiles || options.repositoryFiles.length === 0)) {
+      const notice = `
+
+--- REPOSITORY CONTEXT UNAVAILABLE ---
+${options.repositoryNote}
+`;
+      if (estimateTokens(notice) <= budget) {
+        contextBlocks += notice;
+        budget -= estimateTokens(notice);
+      }
+    }
+
     if (options.repositoryFiles && options.repositoryFiles.length > 0) {
       const header = `
 

@@ -215,7 +215,31 @@ export function describeCoverage(coverage: IndexCoverage | undefined): string | 
 
   return (
     `${head} Symbol extraction currently supports ${SYMBOL_LANGUAGE_LABEL} only, so ` +
-    `${file(withoutSymbols)} were indexed by path and content only.`
+    `${file(withoutSymbols)} were indexed by path and content only.${importNote(coverage)}`
+  );
+}
+
+/**
+ * Says so when this snapshot has no import graph, appended to the coverage note.
+ *
+ * `importsExtracted` is OPTIONAL on IndexCoverage, and undefined is the load-bearing
+ * case: it means the snapshot was indexed before import extraction existed at all.
+ * Those repositories have the feature switched off and no edge rows, and nothing
+ * re-indexes them automatically — so a user asking why answers never widen along
+ * imports would otherwise have no way to find out. Re-attaching the repository
+ * re-ingests it; that is the fix, and it is a separate change from saying so.
+ */
+function importNote(coverage: IndexCoverage): string {
+  if (coverage.importsExtracted === true) return "";
+  if (coverage.importsExtracted === undefined) {
+    return (
+      " This repository was indexed before import extraction existed, so related files" +
+      " are not followed along imports. Re-attach it to rebuild the index."
+    );
+  }
+  return (
+    " Imports were not parsed for this repository, so related files are not followed" +
+    " along imports."
   );
 }
 

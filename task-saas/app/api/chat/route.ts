@@ -716,13 +716,30 @@ export async function POST(req: Request): Promise<Response> {
      * and reaches buildContext exactly as before.
      */
     let repositoryFiles: Array<{ path: string; content: string }> | undefined;
+    /**
+     * Told to the model when the repository could not be read.
+     *
+     * The alternative is what used to happen: no files, no note, and an answer written
+     * as though the repository were empty. A model cannot report a gap it was never
+     * told about, and the user cannot see one that never appears in the reply.
+     */
+    let repositoryNote: string | undefined;
 
     if (repository) {
-      repositoryFiles = await loadRepositoryFiles({
+      const selection = await loadRepositoryFiles({
         repository,
         question: userText,
         contextTokens: resolved.effectiveContextTokens,
       });
+
+      repositoryFiles = selection.files.length > 0 ? selection.files : undefined;
+
+      if (selection.loadFailed) {
+        repositoryNote =
+          "The repository attached to this project could not be read for this message, " +
+          "so none of its source is available here. Say so plainly before answering, " +
+          "and do not describe the repository's code as though you had seen it.";
+      }
     }
 
     const buildContext = (maxRecentTurns?: number) =>
@@ -737,6 +754,7 @@ export async function POST(req: Request): Promise<Response> {
         projectInstructions,
         projectMemory,
         repositoryFiles,
+        repositoryNote,
       });
 
     let context = buildContext();
@@ -1483,6 +1501,36 @@ async function persistTurn(
  * an ordinary conversation — the model answering without the code is worse than
  * answering with it, but far better than the turn failing outright.
  */
+/**
+ * Per-turn repository coverage, in the same honest spirit as IndexCoverage.
+ *
+ * `graph` distinguishes four states that an absent neighbour cannot distinguish on
+ * its own, and conflating them is what made the previous version unauditable:
+ *   not-indexed     the snapshot predates import extraction, or its language is not
+ *                   parsed. There are no edges and there never were.
+ *   unavailable     edges exist but the query for them FAILED. Different from having
+ *                   none, and the difference is a bug report rather than a fact.
+ *   no-contribution edges were read and produced no candidate this turn.
+ *   contributed     the graph put at least one file in front of the model.
+ */
+export type GraphCoverage = "not-indexed" | "unavailable" | "no-contribution" | "contributed";
+
+export interface RepositorySelection {
+  files: Array<{ path: string; content: string }>;
+  graph: GraphCoverage;
+  /** Files chosen that came from the graph rather than from matching. */
+  graphFiles: number;
+  /**
+   * The repository index itself could not be read.
+   *
+   * NOT the same as selecting zero files: an empty selection means the repository was
+   * consulted and nothing was worth reading, while this means it was never consulted.
+   * The caller must tell the model, because a model answering with neither the files
+   * nor the knowledge that files are missing sounds exactly as confident either way.
+   */
+  loadFailed: boolean;
+}
+
 async function loadRepositoryFiles(params: {
   repository: {
     id: string;
@@ -1494,7 +1542,7 @@ async function loadRepositoryFiles(params: {
   };
   question: string;
   contextTokens: number;
-}): Promise<Array<{ path: string; content: string }> | undefined> {
+}): Promise<RepositorySelection> {
   const { repository, question, contextTokens } = params;
 
   try {
@@ -1541,8 +1589,9 @@ async function loadRepositoryFiles(params: {
      */
     const empty = (
       reason: string,
-      counts: { candidates: number; scored: number; chosen: number; fetched: number }
-    ): undefined => {
+      counts: { candidates: number; scored: number; chosen: number; fetched: number },
+      graph: GraphCoverage = "not-indexed"
+    ): RepositorySelection => {
       logger.warn("Repository attached but no files reached the model", {
         repositoryId: repository.id,
         reason,
@@ -1551,7 +1600,9 @@ async function loadRepositoryFiles(params: {
         query: scrubForLog(question).slice(0, REPOSITORY_QUERY_LOG_CHARS),
         ...counts,
       });
-      return undefined;
+      // An empty selection, not a failed one. The repository WAS read; nothing in it
+      // was worth putting in front of the model this turn.
+      return { files: [], graph, graphFiles: 0, loadFailed: false };
     };
 
     if (indexed.length === 0) {
@@ -1584,6 +1635,11 @@ async function loadRepositoryFiles(params: {
      *     depth-ordered guess that fallbackFiles would otherwise fall through to.
      */
     let links: Array<{ fromPath: string; toPath: string }> = [];
+    /**
+     * Starts as not-indexed: with importsExtracted false there are no edges and never
+     * were, which is a fact about the snapshot rather than a failure this turn.
+     */
+    let graph: GraphCoverage = repository.importsExtracted ? "no-contribution" : "not-indexed";
 
     if (repository.importsExtracted) {
       const idByPath = new Map(indexed.map((f) => [f.path, f.id]));
@@ -1599,6 +1655,7 @@ async function loadRepositoryFiles(params: {
         .filter((id): id is string => typeof id === "string");
 
       if (seedIds.length > 0) {
+        try {
         const edgeRows = await prisma.fileEdge.findMany({
           where: {
             repositoryId: repository.id,
@@ -1618,6 +1675,23 @@ async function loadRepositoryFiles(params: {
           if (!fromPath || !toPath) return [];
           return [{ fromPath, toPath }];
         });
+        } catch (error) {
+          /**
+           * A failed edge query is a PARTIAL failure and must not take the turn with
+           * it. Scored files are already in hand and are the larger part of the value;
+           * losing them because an optional widening step broke would be the same
+           * silent-blindness failure this whole change exists to remove.
+           *
+           * Recorded as `unavailable` rather than left looking like "no edges": one is
+           * a fact about the repository, the other is a bug report.
+           */
+          graph = "unavailable";
+          links = [];
+          logger.warn("Import graph unavailable for this turn", {
+            repositoryId: repository.id,
+            error: error instanceof Error ? error.message : "unknown",
+          });
+        }
       }
     }
 
@@ -1629,18 +1703,10 @@ async function loadRepositoryFiles(params: {
      */
     const candidates =
       scored.length > 0
-        ? expandAlongEdges(scored, indexed, links)
+        ? expandAlongEdges(scored, indexed, links, MAX_REPOSITORY_FILES_PER_TURN)
         : fallbackFiles(indexed, repository.entryPoints, MAX_REPOSITORY_FILES_PER_TURN, links);
 
-    /**
-     * How many of the candidates came from the graph rather than from matching.
-     *
-     * Reported because the expansion is otherwise completely invisible: it changes which
-     * files the model sees and leaves no trace in the answer. Without this the only way
-     * to know whether edges ever fire in production would be to reason about the code,
-     * which is how a feature quietly does nothing for months.
-     */
-    const fromGraph = scored.length > 0 ? candidates.length - scored.length : 0;
+
 
     // Currently unreachable, and deliberately checked anyway: fallbackFiles(indexed, ...)
     // cannot return empty while `indexed` is non-empty — with no entry points matched it
@@ -1683,33 +1749,57 @@ async function loadRepositoryFiles(params: {
       }
     }
 
+    // Counted from what was actually FETCHED, not from what was chosen: a graph file
+    // that failed to download did not reach the model, and reporting it as a
+    // contribution would overstate the feature every time GitHub hiccups.
+    const graphPaths = new Set(chosen.filter((c) => c.viaGraph === true).map((c) => c.path));
+    const chosenFromGraph = files.filter((f) => graphPaths.has(f.path)).length;
+    if (graph !== "unavailable" && graph !== "not-indexed") {
+      graph = chosenFromGraph > 0 ? "contributed" : "no-contribution";
+    }
+
     logger.debug("Repository files selected", {
       repositoryId: repository.id,
       candidates: indexed.length,
       scored: scored.length,
       usedFallback: scored.length === 0,
-      // Edge coverage, so a turn that got no graph help is distinguishable from a
-      // repository that has no graph at all.
+      // One field, four distinguishable states — see GraphCoverage. Previously a turn
+      // with a broken edge query and a turn against a repository that has no edges
+      // logged identically.
+      graph,
       importsExtracted: repository.importsExtracted,
       edgesConsidered: links.length,
-      addedByGraph: fromGraph,
-      chosenFromGraph: chosen.filter((c) => c.score === 0 && scored.length > 0).length,
+      addedByGraph: candidates.filter((c) => c.viaGraph === true).length,
+      chosenFromGraph,
       fetched: files.length,
     });
 
     return files.length > 0
-      ? files
-      : empty("all_file_fetches_failed", {
-          candidates: indexed.length,
-          scored: scored.length,
-          chosen: chosen.length,
-          fetched: 0,
-        });
+      ? { files, graph, graphFiles: chosenFromGraph, loadFailed: false }
+      : empty(
+          "all_file_fetches_failed",
+          {
+            candidates: indexed.length,
+            scored: scored.length,
+            chosen: chosen.length,
+            fetched: 0,
+          },
+          graph
+        );
   } catch (error) {
+    /**
+     * TOTAL failure: the index could not be read at all.
+     *
+     * This used to return undefined, which the caller could not tell apart from "the
+     * repository had nothing worth reading". The model then answered from the
+     * conversation alone, in the same confident voice it would have used with the
+     * files — the system was blind and did not say so. `loadFailed` is what the caller
+     * turns into a sentence the model must repeat.
+     */
     logger.warn("Repository file selection failed", {
       repositoryId: repository.id,
       error: error instanceof Error ? error.message : "unknown",
     });
-    return undefined;
+    return { files: [], graph: "not-indexed", graphFiles: 0, loadFailed: true };
   }
 }

@@ -133,6 +133,16 @@ export interface IndexedFile {
 
 export interface ScoredFile extends IndexedFile {
   score: number;
+  /**
+   * True when this file was reached along an import edge rather than by matching.
+   *
+   * An explicit flag rather than inferring it from `score === 0`, which was wrong on
+   * the fallback path: fallbackFiles gives EVERY file a score of 0, so the inference
+   * silently reported zero graph contribution on exactly the path where the graph
+   * changes the most. A measurement that reads zero when the feature is working is
+   * worse than no measurement.
+   */
+  viaGraph?: boolean;
 }
 
 /**
@@ -339,7 +349,7 @@ export function fallbackFiles(
     const seeds = chosen.map((c) => c.path);
     for (const file of neighboursOf(seeds, candidates, edges, new Set(seeds))) {
       if (chosen.length >= maxFiles) return chosen;
-      chosen.push({ ...file, score: 0 });
+      chosen.push({ ...file, score: 0, viaGraph: true });
     }
   }
 
@@ -367,19 +377,29 @@ export interface FileEdgeLink {
 }
 
 /**
- * Files one import hop from `seeds`, in a deterministic, bounded order.
+ * Files one import hop from `seeds`, ranked deterministically.
  *
- * BOTH DIRECTIONS, DEPENDENCIES FIRST. What a seed imports usually explains how it
- * works; what imports the seed shows how it is used. The first answers more questions,
- * so it is ordered first and wins the budget when only some neighbours fit.
+ * RANKING RULE: how many of the seeds reference the file, descending; then
+ * dependencies before dependents; then path, ascending.
  *
- * Bounded per seed and in total because a hub module in a real repository has hundreds
- * of importers, and an unbounded expansion would quietly turn "read the relevant files"
+ * Chosen over the obvious alternatives because on this data both of those are
+ * CONSTANT and would rank nothing:
+ *   - edge kind: the query that loads these filters `kind: "resolved"`, so every
+ *     candidate has the same kind.
+ *   - distance from a scored file: expansion is a single hop, so every candidate is
+ *     at distance 1.
+ * Seed count is the one signal that actually varies. A file imported by two of the
+ * top matches is shared ground between them, which is a better guess at "the code
+ * that explains this area" than a file only one match happens to touch.
+ *
+ * Insertion order is deliberately NOT used, and the final path tie-break makes the
+ * ordering total: two runs over the same edges in a different order rank identically.
+ * A selection that varied between identical turns would make a wrong answer
+ * impossible to reproduce.
+ *
+ * Bounded per seed and in total, because a hub module in a real repository has
+ * hundreds of importers and unbounded expansion would turn "read the relevant files"
  * into "read the repository".
- *
- * Sorted rather than left in edge order so the same repository and question always
- * produce the same list. A selection that varied between identical turns would make a
- * wrong answer impossible to reproduce.
  */
 function neighboursOf(
   seeds: readonly string[],
@@ -389,11 +409,7 @@ function neighboursOf(
    * Paths already selected, which callers MUST include the seeds in — both do.
    *
    * That requirement is what makes a self-import a non-event here: the seed is
-   * excluded, so an edge from a file to itself can never add it a second time. A
-   * dedicated self-edge guard was written and then deleted, because mutation
-   * testing showed removing it changed no result — the exclusion had been doing the
-   * work. Stated rather than re-derived, since a future caller passing an exclude
-   * set without its seeds would silently reintroduce the duplicate.
+   * excluded, so an edge from a file to itself can never add it a second time.
    */
   exclude: ReadonlySet<string>
 ): IndexedFile[] {
@@ -411,66 +427,85 @@ function neighboursOf(
     ).push(edge.fromPath);
   }
 
-  const out: IndexedFile[] = [];
-  const taken = new Set<string>();
+  /** Per candidate: which seeds reached it, and whether any reached it as a dependency. */
+  const stats = new Map<string, { seeds: Set<string>; dependency: boolean }>();
 
   for (const seed of seeds.slice(0, EDGE_SEED_LIMIT)) {
-    if (out.length >= EDGE_NEIGHBOURS_TOTAL) break;
-
-    const candidates = [
-      ...(imports.get(seed) ?? []).slice().sort(),
-      ...(importedBy.get(seed) ?? []).slice().sort(),
+    // Dependencies first so the per-seed cap, when it bites, keeps the code the seed
+    // RUNS over the code that merely calls it.
+    const reachable: Array<[string, boolean]> = [
+      ...(imports.get(seed) ?? []).slice().sort().map((p): [string, boolean] => [p, true]),
+      ...(importedBy.get(seed) ?? []).slice().sort().map((p): [string, boolean] => [p, false]),
     ];
 
     let fromThisSeed = 0;
-    for (const path of candidates) {
+    for (const [path, isDependency] of reachable) {
       if (fromThisSeed >= EDGE_NEIGHBOURS_PER_SEED) break;
-      if (out.length >= EDGE_NEIGHBOURS_TOTAL) break;
-      if (exclude.has(path) || taken.has(path)) continue;
-
-      const file = byPath.get(path);
+      if (exclude.has(path)) continue;
       // Absent when the edge points at a file the caller did not load — one outside the
       // scan limit, or without a recognised source extension. Skipped rather than
       // fetched: this module may only choose among files it was given.
-      if (!file) continue;
+      if (!byPath.has(path)) continue;
 
-      taken.add(path);
-      fromThisSeed++;
-      out.push(file);
+      const entry = stats.get(path) ?? { seeds: new Set<string>(), dependency: false };
+      if (!stats.has(path)) fromThisSeed++;
+      else if (!entry.seeds.has(seed)) fromThisSeed++;
+      entry.seeds.add(seed);
+      entry.dependency = entry.dependency || isDependency;
+      stats.set(path, entry);
     }
   }
 
-  return out;
+  return Array.from(stats)
+    .sort((a, b) => {
+      const bySeedCount = b[1].seeds.size - a[1].seeds.size;
+      if (bySeedCount !== 0) return bySeedCount;
+      const byDirection = Number(b[1].dependency) - Number(a[1].dependency);
+      if (byDirection !== 0) return byDirection;
+      return a[0].localeCompare(b[0]);
+    })
+    .slice(0, EDGE_NEIGHBOURS_TOTAL)
+    .map(([path]) => byPath.get(path)!);
 }
 
 /**
- * Add each strong match's import neighbours as a SECOND TIER beneath it.
+ * Widen the strongest matches along the import graph, reserving one slot for the graph.
  *
- * WHAT THIS FIXES
- * Scoring matches a question's words against paths and symbol names. A file can be the
- * right answer and share no words with the question. Symbols closed part of that gap;
- * edges close a different part: when scoring DOES find the right area, the code that
- * explains it is often one import away, in a file the question never names.
+ * WHY A RESERVED SLOT AND NOT A LONGER LIST
+ * The previous version appended neighbours after every scored file. That made "a
+ * neighbour never displaces a match" structurally true and the feature structurally
+ * INERT: with a three-file cap and three or more scored files, no neighbour was ever
+ * reachable. Measured on sindresorhus/ky — identical selection with and without edges.
  *
- * WHY NEIGHBOURS ARE APPENDED RATHER THAN SCORED
- * They are concatenated after every directly-scored file instead of being given a score
- * and re-sorted. That makes "a neighbour never displaces a file that matched the
- * question" a structural property rather than an arithmetic one — no weight to tune, and
- * no way for a later change to the scale to let a guess outrank a match.
+ * So the best-ranked neighbour is placed at the LAST guaranteed slot instead of after
+ * everything. With `maxFiles` of 3 the order becomes:
  *
- * CONSEQUENCE, and it is worth stating rather than discovering: with a small per-turn
- * file cap, this fires only when scoring returned fewer files than the cap. That is the
- * conservative half of the wiring on purpose. The half that actually changes most turns
- * is in `fallbackFiles`, where the ordering being displaced is an admitted guess.
+ *   scored[0], scored[1], bestNeighbour, scored[2], scored[3], …, remaining neighbours
  *
- * Returns `scored` unchanged when there are no edges, which is what a repository indexed
- * before edges existed produces. Degrading to the previous behaviour is the correct
- * response to an absent graph; inventing neighbours from path proximity would not be.
+ * The two strongest matches still outrank the graph, always. What the neighbour
+ * displaces is the THIRD-best keyword match — and that is the trade this change is
+ * making, stated rather than buried: one hop from a strong match is a better bet than
+ * the third file that merely shares a word with the question.
+ *
+ * Raising the cap was rejected instead. The cap bounds GitHub fetches per turn, which
+ * are paid on every question, whereas the benefit of a fourth file only materialises
+ * on some. Reordering costs nothing extra.
+ *
+ * If the reserved neighbour does not fit the token budget, `selectWithinBudget` skips
+ * it and takes the next candidate, so a reserved slot is never a wasted one.
+ *
+ * Returns `scored` unchanged when there are no edges — the behaviour of a repository
+ * indexed before edges existed, which must not change.
  */
 export function expandAlongEdges(
   scored: readonly ScoredFile[],
   files: readonly IndexedFile[],
-  edges: readonly FileEdgeLink[]
+  edges: readonly FileEdgeLink[],
+  /**
+   * The caller's per-turn file cap. The reservation is placed relative to it, because
+   * "the last guaranteed slot" is only meaningful against the number of slots.
+   */
+  maxFiles: number
 ): ScoredFile[] {
   if (scored.length === 0 || edges.length === 0) return [...scored];
 
@@ -480,11 +515,16 @@ export function expandAlongEdges(
     files,
     edges,
     chosen
-  );
+  ).map((file) => ({ ...file, score: 0, viaGraph: true }));
 
-  // Score 0 marks "not matched, included by adjacency". The ordering that matters is
-  // positional, and nothing downstream re-sorts.
-  return [...scored, ...neighbours.map((file) => ({ ...file, score: 0 }))];
+  if (neighbours.length === 0) return [...scored];
+
+  // At least one scored file always precedes the reservation, however small the cap:
+  // the top match is never displaced by adjacency.
+  const reserveAt = Math.max(1, Math.min(maxFiles - 1, scored.length));
+  const [best, ...rest] = neighbours;
+
+  return [...scored.slice(0, reserveAt), best, ...scored.slice(reserveAt), ...rest];
 }
 
 /**

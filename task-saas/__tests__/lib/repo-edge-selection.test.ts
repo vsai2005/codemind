@@ -48,7 +48,7 @@ describe("expandAlongEdges", () => {
     const scored: ScoredFile[] = [{ ...file("src/retry.ts"), score: 30 }];
     const edges = [link("src/retry.ts", "src/backoff.ts"), link("src/http.ts", "src/retry.ts")];
 
-    const result = expandAlongEdges(scored, files, edges);
+    const result = expandAlongEdges(scored, files, edges, 3);
 
     expect(paths(result)).toEqual(["src/retry.ts", "src/backoff.ts", "src/http.ts"]);
   });
@@ -59,25 +59,116 @@ describe("expandAlongEdges", () => {
     const scored: ScoredFile[] = [{ ...file("src/retry.ts"), score: 30 }];
     const edges = [link("src/http.ts", "src/retry.ts"), link("src/retry.ts", "src/backoff.ts")];
 
-    const result = expandAlongEdges(scored, files, edges);
+    const result = expandAlongEdges(scored, files, edges, 3);
 
     expect(paths(result).indexOf("src/backoff.ts")).toBeLessThan(
       paths(result).indexOf("src/http.ts")
     );
   });
 
-  it("never places a neighbour above a file that matched the question", () => {
-    // The structural guarantee. Neighbours are concatenated rather than scored, so no
-    // weight exists that could be tuned into letting adjacency beat evidence.
+  it("reserves the last guaranteed slot for the graph, ahead of weaker matches", () => {
+    // THE BEHAVIOUR THIS CHANGE EXISTS FOR, and the assertion that used to say the
+    // opposite. Neighbours previously queued behind every scored file, which with a
+    // three-file cap made them unreachable whenever three files scored — measured as
+    // identical selection on sindresorhus/ky.
+    //
+    // Now the best neighbour takes slot 3, displacing the THIRD-best keyword match.
+    // The two strongest matches still precede it, always.
     const scored: ScoredFile[] = [
       { ...file("src/retry.ts"), score: 30 },
+      { ...file("src/http.ts"), score: 20 },
       { ...file("src/unrelated.ts"), score: 1 },
     ];
     const edges = [link("src/retry.ts", "src/backoff.ts")];
 
-    const result = expandAlongEdges(scored, files, edges);
+    const result = expandAlongEdges(scored, files, edges, 3);
 
-    expect(paths(result)).toEqual(["src/retry.ts", "src/unrelated.ts", "src/backoff.ts"]);
+    expect(paths(result).slice(0, 3)).toEqual([
+      "src/retry.ts",
+      "src/http.ts",
+      "src/backoff.ts",
+    ]);
+    // Displaced, not discarded: it still ranks after the reservation.
+    expect(paths(result)).toContain("src/unrelated.ts");
+  });
+
+  it("keeps the top match ahead of the graph even at a cap of one", () => {
+    const scored: ScoredFile[] = [{ ...file("src/retry.ts"), score: 30 }];
+    const edges = [link("src/retry.ts", "src/backoff.ts")];
+
+    expect(paths(expandAlongEdges(scored, files, edges, 1))[0]).toBe("src/retry.ts");
+  });
+
+  it("ranks a neighbour reached by two seeds above one reached by a single seed", () => {
+    // The ranking rule. Edge kind and hop distance are constant here — only resolved
+    // edges are ever loaded, and expansion is one hop — so seed count is the one
+    // signal that varies.
+    const pool = [
+      file("src/a.ts"),
+      file("src/b.ts"),
+      file("src/shared.ts"),
+      file("src/only-a.ts"),
+    ];
+    const scored: ScoredFile[] = [
+      { ...file("src/a.ts"), score: 30 },
+      { ...file("src/b.ts"), score: 25 },
+    ];
+    const edges = [
+      link("src/a.ts", "src/only-a.ts"),
+      link("src/a.ts", "src/shared.ts"),
+      link("src/b.ts", "src/shared.ts"),
+    ];
+
+    const result = expandAlongEdges(scored, pool, edges, 3);
+    const names = paths(result);
+
+    expect(names.indexOf("src/shared.ts")).toBeLessThan(names.indexOf("src/only-a.ts"));
+  });
+
+  it("breaks a rank tie by path, not by which seed happened to reach it first", () => {
+    // A FALSE-NEGATIVE TEST WAS REPLACED BY THIS ONE. The shuffle test below cannot
+    // catch a missing tie-break: candidates are sorted per seed before they are
+    // recorded, so with a single seed the insertion order is already alphabetical and
+    // removing the final comparator changes nothing.
+    //
+    // Two seeds are what separate them. Seeds are visited in score order, so "zeta"
+    // (reached by the higher-scoring seed) is INSERTED first while "alpha" sorts
+    // first. Equal seed counts and equal direction, so the path comparator is the only
+    // thing that can decide.
+    const pool = [
+      file("src/b.ts"),
+      file("src/a.ts"),
+      file("src/zeta.ts"),
+      file("src/alpha.ts"),
+    ];
+    const scored: ScoredFile[] = [
+      { ...file("src/b.ts"), score: 30 },
+      { ...file("src/a.ts"), score: 20 },
+    ];
+    const edges = [link("src/b.ts", "src/zeta.ts"), link("src/a.ts", "src/alpha.ts")];
+
+    const result = paths(expandAlongEdges(scored, pool, edges, 3));
+
+    expect(result.indexOf("src/alpha.ts")).toBeLessThan(result.indexOf("src/zeta.ts"));
+  });
+
+  it("ranks identically when the edge list is shuffled", () => {
+    // Determinism against input order, not just against repeated calls. Insertion
+    // order must not leak into the ranking.
+    const pool = [file("src/a.ts"), file("src/x.ts"), file("src/y.ts"), file("src/z.ts")];
+    const scored: ScoredFile[] = [{ ...file("src/a.ts"), score: 30 }];
+    const edges = [
+      link("src/a.ts", "src/z.ts"),
+      link("src/a.ts", "src/x.ts"),
+      link("src/a.ts", "src/y.ts"),
+    ];
+
+    const forward = paths(expandAlongEdges(scored, pool, edges, 3));
+    const reversed = paths(expandAlongEdges(scored, pool, [...edges].reverse(), 3));
+    const rotated = paths(expandAlongEdges(scored, pool, [edges[1], edges[2], edges[0]], 3));
+
+    expect(reversed).toEqual(forward);
+    expect(rotated).toEqual(forward);
   });
 
   it("does not re-add a file that already scored", () => {
@@ -87,7 +178,7 @@ describe("expandAlongEdges", () => {
     ];
     const edges = [link("src/retry.ts", "src/backoff.ts")];
 
-    const result = expandAlongEdges(scored, files, edges);
+    const result = expandAlongEdges(scored, files, edges, 3);
 
     expect(paths(result)).toEqual(["src/retry.ts", "src/backoff.ts"]);
   });
@@ -98,7 +189,7 @@ describe("expandAlongEdges", () => {
 
     const scored: ScoredFile[] = [{ ...file("src/retry.ts"), score: 30 }];
 
-    const result = expandAlongEdges(scored, files, [link("src/retry.ts", "src/retry.ts")]);
+    const result = expandAlongEdges(scored, files, [link("src/retry.ts", "src/retry.ts")], 3);
 
     expect(paths(result)).toEqual(["src/retry.ts"]);
   });
@@ -110,7 +201,7 @@ describe("expandAlongEdges", () => {
     const scored: ScoredFile[] = [{ ...file("src/hub.ts"), score: 30 }];
     const edges = many.map((f) => link(f.path, "src/hub.ts"));
 
-    const result = expandAlongEdges(scored, [...many, file("src/hub.ts")], edges);
+    const result = expandAlongEdges(scored, [...many, file("src/hub.ts")], edges, 3);
 
     // Three per seed, and one seed here.
     expect(result.length).toBe(4);
@@ -138,7 +229,7 @@ describe("expandAlongEdges", () => {
       link("src/b.ts", "src/b1.ts"),
     ];
 
-    const result = expandAlongEdges(scored, pool, edges);
+    const result = expandAlongEdges(scored, pool, edges, 3);
 
     // a4 is cut by the per-seed cap; b1 survives because it belongs to another seed.
     expect(paths(result)).not.toContain("src/a4.ts");
@@ -151,8 +242,8 @@ describe("expandAlongEdges", () => {
     const scored: ScoredFile[] = [{ ...file("src/retry.ts"), score: 30 }];
     const edges = [link("src/retry.ts", "src/http.ts"), link("src/retry.ts", "src/backoff.ts")];
 
-    const first = paths(expandAlongEdges(scored, files, edges));
-    const second = paths(expandAlongEdges(scored, files, [...edges].reverse()));
+    const first = paths(expandAlongEdges(scored, files, edges, 3));
+    const second = paths(expandAlongEdges(scored, files, [...edges].reverse(), 3));
 
     expect(second).toEqual(first);
   });
@@ -163,7 +254,7 @@ describe("expandAlongEdges", () => {
     // graph; inventing neighbours from path proximity would not be.
     const scored: ScoredFile[] = [{ ...file("src/retry.ts"), score: 30 }];
 
-    expect(paths(expandAlongEdges(scored, files, []))).toEqual(["src/retry.ts"]);
+    expect(paths(expandAlongEdges(scored, files, [], 3))).toEqual(["src/retry.ts"]);
   });
 
   it("skips an edge pointing outside the loaded candidate set", () => {
@@ -172,14 +263,14 @@ describe("expandAlongEdges", () => {
     const scored: ScoredFile[] = [{ ...file("src/retry.ts"), score: 30 }];
     const edges = [link("src/retry.ts", "vendor/not-loaded.ts")];
 
-    expect(paths(expandAlongEdges(scored, files, edges))).toEqual(["src/retry.ts"]);
+    expect(paths(expandAlongEdges(scored, files, edges, 3))).toEqual(["src/retry.ts"]);
   });
 
   it("skips a neighbour with no recognised source language", () => {
     const scored: ScoredFile[] = [{ ...file("src/retry.ts"), score: 30 }];
     const pool = [file("src/retry.ts"), file("README.md", { language: null })];
 
-    const result = expandAlongEdges(scored, pool, [link("src/retry.ts", "README.md")]);
+    const result = expandAlongEdges(scored, pool, [link("src/retry.ts", "README.md")], 3);
 
     expect(paths(result)).toEqual(["src/retry.ts"]);
   });
@@ -255,7 +346,7 @@ describe("the two paths together", () => {
     const scored = scoreFiles(pool, "how does retry work");
     expect(paths(scored)[0]).toBe("src/retry.ts");
 
-    const expanded = expandAlongEdges(scored, pool, [link("src/retry.ts", "src/backoff.ts")]);
+    const expanded = expandAlongEdges(scored, pool, [link("src/retry.ts", "src/backoff.ts")], 3);
 
     expect(paths(expanded)[0]).toBe("src/retry.ts");
     expect(paths(expanded)).toContain("src/backoff.ts");
