@@ -73,19 +73,64 @@ const IMPORT_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
- * Raw import specifiers found in `source`, deduplicated and order-stable.
+ * How completely a file's imports could be read.
  *
- * Deduplicated because an edge is a fact about the pair of files, not about how many
- * times one line mentions the other: `import x from "./a"` beside
- * `import type { T } from "./a"` is one dependency, and recording two would double-count
- * it in anything that later ranks by edge weight.
- *
- * Never throws. A file that cannot be scanned yields nothing, because one pathological
- * file must not fail the ingestion of an entire repository.
+ * SEPARATE FROM LANGUAGE SUPPORT, deliberately. "This scanner does not read Python"
+ * and "this TypeScript file's scan broke" are different facts with opposite correct
+ * responses, and a single boolean would force callers to treat them alike. Language
+ * support is a precondition the CALLER checks with `supportsImports`; this describes
+ * what happened once scanning actually started.
  */
-export function extractImports(source: string): string[] {
+export type ImportScanStatus =
+  /** Every pattern ran to the end of the file. The specifier list is exhaustive. */
+  | "complete"
+  /** A pattern threw. Whatever is in the list was found before that; the rest is unknown. */
+  | "aborted"
+  /** The per-file cap was reached, so imports past that point were never looked at. */
+  | "truncated";
+
+export interface ImportScan {
+  /** Specifiers found, deduplicated and order-stable. */
+  specifiers: string[];
+  status: ImportScanStatus;
+  /**
+   * Import-like constructs whose target is not a string literal — `require(base + name)`
+   * and its dynamic-import equivalent.
+   *
+   * A REAL COUNT, not an estimate: it counts `require(` and `import(` occurrences whose
+   * first argument does not open with a quote. Those are legal, reasonably common, and
+   * unreadable by any amount of regex, so a caller that needs certainty has to know
+   * they were there. Everything else this scanner misses it misses silently, and this
+   * number does not pretend otherwise.
+   */
+  unread: number;
+}
+
+/** `require(` / `import(` whose first argument is not a quoted literal. */
+const DYNAMIC_TARGET_PATTERNS: readonly RegExp[] = [
+  /\brequire\s*\(\s*(?!['"])/g,
+  /\bimport\s*\(\s*(?!['"])/g,
+];
+
+/**
+ * Scan a file for import specifiers, reporting how complete the scan was.
+ *
+ * WHY THIS RETURNS CONFIDENCE AND NOT JUST A LIST
+ * It used to return a bare array, and a partial result was indistinguishable from a
+ * complete one. That is harmless on the ingestion path — fewer edges, a weaker graph —
+ * and dangerous on the verification path, where fewer specifiers means fewer
+ * unresolved-import errors, so an artifact could pass because its imports were NOT READ
+ * rather than because they resolved. Same function, opposite risk, and no way for
+ * either caller to tell which it had.
+ *
+ * Never throws. A file that cannot be scanned reports `aborted` with whatever was found
+ * before the failure, because one pathological file must not fail an entire ingestion —
+ * but it says so, which is the part that was missing.
+ */
+export function scanImports(source: string): ImportScan {
   const found: string[] = [];
   const seen = new Set<string>();
+  let status: ImportScanStatus = "complete";
 
   try {
     for (const pattern of IMPORT_PATTERNS) {
@@ -96,15 +141,42 @@ export function extractImports(source: string): string[] {
         if (!specifier || seen.has(specifier)) continue;
         seen.add(specifier);
         found.push(specifier);
-        if (found.length >= MAX_IMPORTS_PER_FILE) return found;
+        if (found.length >= MAX_IMPORTS_PER_FILE) {
+          // Not "complete with a lot of imports": the rest of the file was never read,
+          // and a caller deciding whether every import resolves must know that.
+          return { specifiers: found, status: "truncated", unread: countUnread(source) };
+        }
       }
     }
   } catch {
-    // A regex failure on one file is not a reason to lose the repository's edges.
-    return found;
+    /**
+     * DEFENSIVE, and unreachable from any input as these patterns stand: `exec` does not
+     * throw on a string, so nothing here can currently produce `aborted`.
+     *
+     * Recorded as measured rather than assumed — a mutation that reported this state as
+     * `complete` did not fail a single test, which is the signature of unreachable code
+     * rather than of a weak test. It stays because the alternative is that the day a
+     * pattern DOES throw, an ingestion is lost instead of degraded, and because
+     * verification's response to the state is tested by injection.
+     */
+    status = "aborted";
   }
 
-  return found;
+  return { specifiers: found, status, unread: countUnread(source) };
+}
+
+/** Import-like constructs with a non-literal target. Never throws. */
+function countUnread(source: string): number {
+  let total = 0;
+  try {
+    for (const pattern of DYNAMIC_TARGET_PATTERNS) {
+      pattern.lastIndex = 0;
+      while (pattern.exec(source) !== null) total++;
+    }
+  } catch {
+    return total;
+  }
+  return total;
 }
 
 /** tsconfig `compilerOptions` fields that affect resolution, and nothing else. */

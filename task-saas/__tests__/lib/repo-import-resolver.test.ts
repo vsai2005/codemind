@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  extractImports,
+  scanImports,
   parseTsconfigAliases,
   resolveImport,
   supportsImports,
@@ -35,7 +35,7 @@ describe("import extraction", () => {
       `const f = await import("./f");`,
     ].join("\n");
 
-    expect(extractImports(source)).toEqual([
+    expect(scanImports(source).specifiers).toEqual([
       "node:fs",
       "./a",
       "../types/b",
@@ -53,7 +53,7 @@ describe("import extraction", () => {
     // internal edges in this very codebase.
     const source = ["import {", "  alpha,", "  beta,", `} from "./greek";`].join("\n");
 
-    expect(extractImports(source)).toContain("./greek");
+    expect(scanImports(source).specifiers).toContain("./greek");
   });
 
   it("records one specifier however many times it is imported", () => {
@@ -61,12 +61,12 @@ describe("import extraction", () => {
     // double-count the dependency in anything that later ranks by edge weight.
     const source = [`import a from "./same";`, `import type { T } from "./same";`].join("\n");
 
-    expect(extractImports(source)).toEqual(["./same"]);
+    expect(scanImports(source).specifiers).toEqual(["./same"]);
   });
 
   it("yields nothing rather than throwing on input it cannot read", () => {
-    expect(extractImports("")).toEqual([]);
-    expect(extractImports("not source code at all")).toEqual([]);
+    expect(scanImports("").specifiers).toEqual([]);
+    expect(scanImports("not source code at all").specifiers).toEqual([]);
   });
 
   it("covers javascript and typescript, and says so", () => {

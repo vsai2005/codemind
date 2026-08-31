@@ -229,7 +229,14 @@ export interface IndexCoverage {
    * count is the signature of a repo whose aliases were missed entirely.
    */
   tsconfigAliasesLoaded?: boolean;
-
+  /**
+   * Files whose import scan aborted or was truncated.
+   *
+   * Their edges were kept, so this is not a count of lost data — it is a count of files
+   * whose edge list is a floor rather than a total. Optional because a snapshot indexed
+   * before the scanner reported confidence cannot say, and "cannot say" is not zero.
+   */
+  filesWithIncompleteImportScan?: number;
 }
 
 /**
@@ -308,7 +315,17 @@ function entryPointNote(entryPointCount: number | undefined): string {
 }
 
 function importNote(coverage: IndexCoverage): string {
-  if (coverage.importsExtracted === true) return "";
+  if (coverage.importsExtracted === true) {
+    const incomplete = coverage.filesWithIncompleteImportScan ?? 0;
+    if (incomplete === 0) return "";
+    // Said out loud rather than left in the numbers: an edge count that looks healthy
+    // can still be a floor, and a reader comparing two repositories deserves to know
+    // which one's graph is partial.
+    return (
+      ` Imports could not be fully read in ${incomplete} file${incomplete === 1 ? "" : "s"},` +
+      ` so the import graph for ${incomplete === 1 ? "it" : "those"} is incomplete.`
+    );
+  }
   if (coverage.importsExtracted === undefined) {
     return (
       " This repository was indexed before import extraction existed, so related files" +

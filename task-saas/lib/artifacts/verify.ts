@@ -1,5 +1,5 @@
 import {
-  extractImports,
+  scanImports,
   parseTsconfigAliases,
   resolveImport,
   supportsImports,
@@ -52,6 +52,8 @@ export type CheckStatus = "passed" | "failed" | "skipped";
 /** Machine-readable finding subtypes. Kept narrow so routing can switch on them. */
 export type FindingCode =
   | "unresolved-internal-import"
+  | "imports-unreadable"
+  | "dynamic-import-target"
   | "missing-dependency"
   | "unused-dependency"
   | "package-json-invalid"
@@ -239,7 +241,54 @@ export function verifyArtifact(artifact: NormalizedArtifact): VerificationReport
   const scannable = artifact.files.filter((f) => supportsImports(languageOf(f.path)));
 
   for (const file of scannable) {
-    for (const specifier of extractImports(file.content)) {
+    const scan = scanImports(file.content);
+
+    /**
+     * THE RULE, and the reason it is an error rather than a warning.
+     *
+     * This check's guarantee is "every internal import in this project resolves". For a
+     * file whose scan did not finish, that guarantee was never established — the
+     * unresolved import the check exists to catch may be sitting in the part that was
+     * never read. Reporting `passed` would claim a check ran that did not, which is the
+     * failure this whole module was written to prevent, arriving through the module
+     * itself.
+     *
+     * It applies ONLY to files in a language the scanner supports. A Python or Go file
+     * is filtered out above and reaches neither this branch nor the resolution loop:
+     * blocking an artifact because its language is unreadable would refuse every valid
+     * project outside JavaScript and TypeScript. Unsupported language and failed scan
+     * are different states and are treated differently here on purpose.
+     */
+    if (scan.status !== "complete") {
+      collector.errors.push({
+        check: "imports-resolve",
+        code: "imports-unreadable",
+        file: file.path,
+        message:
+          scan.status === "truncated"
+            ? `"${file.path}" has more imports than can be checked, so some were never verified`
+            : `"${file.path}" could not be scanned for imports, so they were not verified`,
+        detail: { status: scan.status },
+      });
+    }
+
+    /**
+     * A computed specifier — `require(base + name)` — is legal, reasonably common, and
+     * unreadable by any amount of regex. A WARNING rather than an error because
+     * blocking would refuse valid projects for using a language feature correctly; the
+     * file is named so a human can look at the one thing the checker could not.
+     */
+    if (scan.unread > 0) {
+      collector.warnings.push({
+        check: "imports-resolve",
+        code: "dynamic-import-target",
+        file: file.path,
+        message: `"${file.path}" builds ${scan.unread} import target${scan.unread === 1 ? "" : "s"} at runtime, which could not be checked`,
+        detail: { count: String(scan.unread) },
+      });
+    }
+
+    for (const specifier of scan.specifiers) {
       const resolution = resolveImport(file.path, specifier, paths, aliases);
 
       if (resolution.kind === "resolved") continue;

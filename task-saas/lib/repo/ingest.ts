@@ -12,7 +12,7 @@ import {
 import { readTarball } from "@/lib/repo/archive";
 import { extractInternalSymbols, extractSymbols, supportsSymbols } from "@/lib/repo/symbols";
 import {
-  extractImports,
+  scanImports,
   parseTsconfigAliases,
   resolveImport,
   supportsImports,
@@ -207,6 +207,15 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
     const importsByPath = new Map<string, string[]>();
     /** Root tsconfig contents, captured in the same pass for the same reason. */
     let tsconfigSource: string | null = null;
+    /**
+     * Files whose import scan did not finish.
+     *
+     * Their edges are still written; this records that the edge list for them is a
+     * floor rather than a total. Without it a file that aborted mid-scan is
+     * indistinguishable from one that genuinely imports nothing — the same conflation
+     * Repository.symbolsExtracted exists to prevent, one level down.
+     */
+    const incompleteScans = new Set<string>();
     let symbolsExtracted = false;
     let importsExtracted = false;
     const archiveStarted = Date.now();
@@ -232,8 +241,13 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
           }
 
           if (supportsImports(entryLanguage)) {
-            const specifiers = extractImports(entry.content);
-            if (specifiers.length > 0) importsByPath.set(entry.path, specifiers);
+            const scan = scanImports(entry.content);
+            // Partial results are KEPT. A scan that aborted still found real imports,
+            // and discarding them would trade a known-incomplete graph for an emptier
+            // one — worse on both counts. What must not happen is losing the fact that
+            // it was incomplete, which is what incompleteScans records.
+            if (scan.specifiers.length > 0) importsByPath.set(entry.path, scan.specifiers);
+            if (scan.status !== "complete") incompleteScans.add(entry.path);
           }
         });
         symbolsExtracted = true;
@@ -334,6 +348,9 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
       unresolvedEdges: edges.filter((e) => e.kind === "unresolved").length,
       languagesWithoutImports: languagesPresent.filter((l) => !supportsImports(l)),
       tsconfigAliasesLoaded: aliases !== null,
+      // A floor on how much of the graph is real. A large number here means the
+      // scanner is weaker than the edge count suggests.
+      filesWithIncompleteImportScan: incompleteScans.size,
     };
 
     const structureWithCoverage = { ...structure, coverage };
