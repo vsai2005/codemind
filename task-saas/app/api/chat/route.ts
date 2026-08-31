@@ -22,6 +22,7 @@ import {
 } from "@/lib/attachments";
 import { detectArtifactIntent } from "@/lib/ai/intent";
 import { generateArtifact } from "@/lib/artifacts/generate";
+import { describeWarnings, type VerificationReport } from "@/lib/artifacts/verify";
 import { createArtifactStreamResponse } from "@/lib/artifacts/stream";
 import { buildArtifactBytes } from "@/lib/artifacts/build";
 import { enforceRateLimit, acquireGenerationSlot, concurrentGenerationLimit } from "@/lib/rate-limit";
@@ -1218,6 +1219,18 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
           conversationId,
           type: intent,
           errors: generation.errors,
+          // Only set when VERIFICATION rejected it. Failures caught earlier have no
+          // report, and logging an empty one would misattribute the cause. This is
+          // also the only trace a rejected artifact leaves: no Artifact row is
+          // written, so the verification column cannot measure failures.
+          ...(generation.verification
+            ? {
+                failedChecks: generation.verification.checks
+                  .filter((c) => c.status === "failed")
+                  .map((c) => c.check),
+                codes: generation.verification.errors.map((e) => e.code),
+              }
+            : {}),
         });
 
         const visible = [
@@ -1271,17 +1284,47 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
         return;
       }
 
+      /**
+       * Warnings are shown, not swallowed.
+       *
+       * They do not block the download — a declared-but-unimported dependency is
+       * normal in real projects — but a warning that exists only in a server log is
+       * indistinguishable from one that was never raised. Composed once so the text
+       * the user reads and the text persisted as the assistant message are the same
+       * string; a reply that differed on reload would be its own small dishonesty.
+       */
+      const warningNote = describeWarnings(generation.verification);
+      const visibleText = warningNote
+        ? `${generation.summary}
+
+${warningNote}`
+        : generation.summary;
+
+      if (generation.verification.warnings.length > 0) {
+        logger.info("Artifact verified with warnings", {
+          conversationId,
+          type: intent,
+          warnings: generation.verification.warnings.length,
+          codes: generation.verification.warnings.map((w) => w.code),
+        });
+      }
+
       const record = await persistTurn(
         conversationId,
         userId,
         originalRawContent,
-        generation.summary,
-        { artifact: generation.artifact, byteSize: body.byteLength, userId },
+        visibleText,
+        {
+          artifact: generation.artifact,
+          byteSize: body.byteLength,
+          userId,
+          verification: generation.verification,
+        },
         { provider, model: providerModelId, plan, usage: generation.usage }
       );
 
       writer.progress("ready", "Your download is ready.");
-      writer.text(generation.summary);
+      writer.text(visibleText);
 
       if (record) {
         const metadata: ArtifactMetadata = {
@@ -1309,7 +1352,18 @@ async function persistTurn(
   userId: string,
   userContent: string,
   visibleText: string,
-  artifactData: { artifact: NormalizedArtifact; byteSize: number; userId: string } | null,
+  artifactData: {
+    artifact: NormalizedArtifact;
+    byteSize: number;
+    userId: string;
+    /**
+     * Written so verification outcomes are measurable over time rather than only
+     * observable in a log that rotates. Passed explicitly rather than defaulted:
+     * a caller with no report must store null, which means "not checked", not
+     * "checked and clean".
+     */
+    verification: VerificationReport;
+  } | null,
   origin?: {
     provider: string;
     model: string;
@@ -1348,7 +1402,7 @@ async function persistTurn(
 
   if (!artifactData) return null;
 
-  const { artifact, byteSize } = artifactData;
+  const { artifact, byteSize, verification } = artifactData;
   const created = await prisma.artifact.create({
     data: {
       messageId: assistantMessage.id,
@@ -1359,6 +1413,7 @@ async function persistTurn(
       filename: artifact.filename,
       fileCount: artifact.files.length,
       byteSize,
+      verification: verification as unknown as Prisma.InputJsonValue,
       // Internal representation — never returned to the browser.
       payload: {
         type: artifact.type,

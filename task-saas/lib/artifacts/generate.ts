@@ -2,6 +2,7 @@ import { generateText, type LanguageModelV1 } from "ai";
 import { getModel } from "@/lib/ai/gateway";
 import { parseArtifactOutput } from "./parse";
 import { validateArtifact } from "./validate";
+import { verifyArtifact, type VerificationReport } from "./verify";
 import { scrubForLog } from "@/lib/ai/failure-classification";
 import { getArtifactOutputTokenLimit } from "@/lib/env";
 import { ARTIFACT_LIMITS, type ArtifactType, type NormalizedArtifact } from "./types";
@@ -100,8 +101,27 @@ export interface ArtifactUsage {
 }
 
 export type ArtifactGeneration =
-  | { ok: true; artifact: NormalizedArtifact; summary: string; usage: ArtifactUsage }
-  | { ok: false; errors: string[] };
+  | {
+      ok: true;
+      artifact: NormalizedArtifact;
+      summary: string;
+      usage: ArtifactUsage;
+      /**
+       * Static verification result. Present on success including when it carries
+       * warnings — an artifact is only `ok: true` if verification found no ERRORS.
+       */
+      verification: VerificationReport;
+    }
+  | {
+      ok: false;
+      errors: string[];
+      /**
+       * Present only when verification is what rejected the artifact. Absent for the
+       * earlier failures — a generation that never parsed has nothing to verify, and
+       * an empty report there would read as "checked and found nothing wrong".
+       */
+      verification?: VerificationReport;
+    };
 
 export interface GenerateArtifactOptions {
   type: ArtifactType;
@@ -209,10 +229,34 @@ export async function generateArtifact(
   const validation = validateArtifact(parsed.artifact, type);
   if (!validation.ok) return { ok: false, errors: validation.errors };
 
+  /**
+   * Static verification, after per-file validation and before anything is persisted.
+   *
+   * Placed here rather than in the route because this is where the artifact first
+   * exists in a trusted form, and because every caller of generateArtifact should get
+   * the same guarantee. A caller that could skip verification by construction would
+   * eventually be written.
+   *
+   * Errors are returned in the same `errors` shape as every earlier failure, so the
+   * route's existing rejection path handles them without a second branch: the turn is
+   * persisted with an honest message naming the first problem, and no Artifact row is
+   * written. That is the policy lib/env.ts states for truncated output, applied to a
+   * project that is complete file-by-file and incoherent as a whole.
+   */
+  const verification = verifyArtifact(validation.artifact);
+  if (!verification.ok) {
+    return {
+      ok: false,
+      errors: verification.errors.map((finding) => finding.message),
+      verification,
+    };
+  }
+
   return {
     ok: true,
     artifact: validation.artifact,
     summary: parsed.summary ?? defaultSummary(validation.artifact),
     usage,
+    verification,
   };
 }

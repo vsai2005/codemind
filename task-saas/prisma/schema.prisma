@@ -277,7 +277,22 @@ model Artifact {
   fileCount Int          @default(0)
   byteSize  Int          @default(0)
   payload   Json
-  createdAt DateTime     @default(now())
+
+  /// Static verification report for this artifact — see lib/artifacts/verify.ts.
+  ///
+  /// NULLABLE, and the null case means something specific: this artifact predates
+  /// verification, or was written by a path that did not run it. A row with `null`
+  /// here has NOT been checked and found clean; it has not been checked. Defaulting it
+  /// to an empty passing report would erase that difference and quietly inflate any
+  /// measurement taken over this column.
+  ///
+  /// Only successful artifacts have rows at all, because an artifact with verification
+  /// errors is never persisted. This column therefore measures WARNING rates and which
+  /// checks ran — not the pass/fail rate of generation, which would need failures to
+  /// be recorded somewhere they currently are not.
+  verification Json?
+
+  createdAt DateTime @default(now())
 
   @@index([messageId])
   @@index([userId, createdAt])
