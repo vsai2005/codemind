@@ -368,6 +368,54 @@ export function fallbackFiles(
   return chosen;
 }
 
+/**
+ * Files that look like hubs, from the import graph alone.
+ *
+ * TIER 3 of entry-point detection, used only when the repository declares nothing and
+ * matches no convention. A file that many others import and that imports few things
+ * itself is where the repository's shared meaning lives — which is the same thing an
+ * entry point is for, arrived at from evidence rather than from a filename.
+ *
+ * Ranked by inbound count descending, then by OUTBOUND ascending: between two files
+ * imported equally often, the one that pulls in less is nearer the bottom of the stack
+ * and explains more per line. Path breaks the remaining ties so the ordering is total
+ * and cannot depend on edge order.
+ *
+ * Returns nothing when there are no edges. A repository with no graph has no structural
+ * evidence, and inventing an entry point from path shape would be the guess this tier
+ * exists to replace.
+ */
+export function hubFiles(
+  files: readonly IndexedFile[],
+  edges: readonly FileEdgeLink[],
+  limit: number
+): string[] {
+  if (edges.length === 0) return [];
+
+  const selectable = new Set(files.filter(isSelectableSource).map((f) => f.path));
+  const inbound = new Map<string, number>();
+  const outbound = new Map<string, number>();
+
+  for (const edge of edges) {
+    if (edge.fromPath === edge.toPath) continue;
+    if (selectable.has(edge.toPath)) inbound.set(edge.toPath, (inbound.get(edge.toPath) ?? 0) + 1);
+    if (selectable.has(edge.fromPath)) {
+      outbound.set(edge.fromPath, (outbound.get(edge.fromPath) ?? 0) + 1);
+    }
+  }
+
+  return Array.from(inbound)
+    .sort((a, b) => {
+      const byInbound = b[1] - a[1];
+      if (byInbound !== 0) return byInbound;
+      const byOutbound = (outbound.get(a[0]) ?? 0) - (outbound.get(b[0]) ?? 0);
+      if (byOutbound !== 0) return byOutbound;
+      return a[0].localeCompare(b[0]);
+    })
+    .slice(0, limit)
+    .map(([path]) => path);
+}
+
 /** One resolved import edge, reduced to the two paths it connects. */
 export interface FileEdgeLink {
   /** The importing file. */

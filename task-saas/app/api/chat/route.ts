@@ -48,9 +48,11 @@ import {
   SUMMARY_MAX_OUTPUT_TOKENS,
 } from "@/lib/ai/summarization";
 import { fetchFileContent } from "@/lib/repo/github";
+import { detectEntryPoints } from "@/lib/repo/structure";
 import {
   expandAlongEdges,
   fallbackFiles,
+  hubFiles,
   scoreFiles,
   selectWithinBudget,
 } from "@/lib/repo/selection";
@@ -1515,6 +1517,20 @@ async function persistTurn(
  */
 export type GraphCoverage = "not-indexed" | "unavailable" | "no-contribution" | "contributed";
 
+/**
+ * Which tier of entry-point detection produced a starting point.
+ *
+ * Reported rather than hidden because the tiers mean different things about the
+ * repository: `conventional` is a layout everyone recognises, `structural` is a guess
+ * from the import graph that nobody declared, and `none` means the fallback path had no
+ * starting point at all and read files by depth.
+ *
+ * `manifest` is declared and NOT IMPLEMENTED — see the note at the detection site. It
+ * exists in the type so the day it can be implemented is an addition rather than a
+ * rename of stored values.
+ */
+export type EntryPointTier = "manifest" | "conventional" | "structural" | "none";
+
 export interface RepositorySelection {
   files: Array<{ path: string; content: string }>;
   graph: GraphCoverage;
@@ -1634,6 +1650,33 @@ async function loadRepositoryFiles(params: {
      *   - scoring matched nothing -> the entry points, whose imports beat the
      *     depth-ordered guess that fallbackFiles would otherwise fall through to.
      */
+    /**
+     * Entry points, re-detected at query time rather than read from stored structure.
+     *
+     * TIER 1 (manifest-declared) IS NOT IMPLEMENTED, and the reason is a hard
+     * constraint rather than a choice: package.json CONTENT is nowhere available here.
+     * RepositoryFile stores path, blobSha, size, language and symbols — no content —
+     * and detectStructure sees only tree entries, so it records manifest PATHS and
+     * never their bodies. Reading `main`/`module`/`exports`/`bin` would therefore cost
+     * one GitHub request per turn on top of the three files already fetched, breaking
+     * the per-turn fetch bound. Capturing it during ingestion is the right fix and is a
+     * different change.
+     *
+     * Re-detecting here rather than trusting `repository.entryPoints` is what lets an
+     * index built before the widening benefit from it. ky was indexed with a list that
+     * had `src/index.ts` and not `source/index.ts`, and stored an empty array.
+     */
+    let entryPoints = repository.entryPoints;
+    let entryTier: EntryPointTier = entryPoints.length > 0 ? "conventional" : "none";
+
+    if (entryPoints.length === 0) {
+      const widened = detectEntryPoints(new Set(indexed.map((f) => f.path)));
+      if (widened.length > 0) {
+        entryPoints = widened;
+        entryTier = "conventional";
+      }
+    }
+
     let links: Array<{ fromPath: string; toPath: string }> = [];
     /**
      * Starts as not-indexed: with importsExtracted false there are no edges and never
@@ -1645,10 +1688,48 @@ async function loadRepositoryFiles(params: {
       const idByPath = new Map(indexed.map((f) => [f.path, f.id]));
       const pathById = new Map(indexed.map((f) => [f.id, f.path]));
 
+      /**
+       * TIER 3: no declaration, no convention — ask the graph.
+       *
+       * Only on the fallback path, and only when nothing else found a starting point.
+       * One aggregate query, not a file fetch, so the per-turn fetch bound is untouched.
+       */
+      if (scored.length === 0 && entryPoints.length === 0) {
+        try {
+          const rows = await prisma.fileEdge.findMany({
+            where: { repositoryId: repository.id, kind: "resolved" },
+            select: { sourceFileId: true, targetFileId: true },
+            take: REPOSITORY_EDGE_SCAN_LIMIT,
+          });
+          const pathOf = new Map(indexed.map((f) => [f.id, f.path]));
+          const all = rows.flatMap((r) => {
+            const fromPath = pathOf.get(r.sourceFileId);
+            const toPath = r.targetFileId ? pathOf.get(r.targetFileId) : undefined;
+            return fromPath && toPath ? [{ fromPath, toPath }] : [];
+          });
+
+          // Ranked by hubFiles rather than by the database. A groupBy would count just
+          // as well but orders ties arbitrarily, and an entry point that changed
+          // between identical turns would make a wrong answer unreproducible.
+          const detected = hubFiles(indexed, all, REPOSITORY_EDGE_SEEDS);
+          if (detected.length > 0) {
+            entryPoints = detected;
+            entryTier = "structural";
+          }
+        } catch (error) {
+          // Same posture as the edge query below: an optional detection tier failing
+          // must not cost the turn its files.
+          logger.warn("Structural entry-point detection unavailable", {
+            repositoryId: repository.id,
+            error: error instanceof Error ? error.message : "unknown",
+          });
+        }
+      }
+
       const seedPaths =
         scored.length > 0
           ? scored.slice(0, REPOSITORY_EDGE_SEEDS).map((f) => f.path)
-          : repository.entryPoints.slice(0, REPOSITORY_EDGE_SEEDS);
+          : entryPoints.slice(0, REPOSITORY_EDGE_SEEDS);
 
       const seedIds = seedPaths
         .map((path) => idByPath.get(path))
@@ -1704,7 +1785,7 @@ async function loadRepositoryFiles(params: {
     const candidates =
       scored.length > 0
         ? expandAlongEdges(scored, indexed, links, MAX_REPOSITORY_FILES_PER_TURN)
-        : fallbackFiles(indexed, repository.entryPoints, MAX_REPOSITORY_FILES_PER_TURN, links);
+        : fallbackFiles(indexed, entryPoints, MAX_REPOSITORY_FILES_PER_TURN, links);
 
 
 
@@ -1767,6 +1848,10 @@ async function loadRepositoryFiles(params: {
       // with a broken edge query and a turn against a repository that has no edges
       // logged identically.
       graph,
+      // Which tier produced a starting point. "none" means the fallback path had none
+      // and read by depth — diagnostic, not an implementation detail.
+      entryTier,
+      entryPoints: entryPoints.length,
       importsExtracted: repository.importsExtracted,
       edgesConsidered: links.length,
       addedByGraph: candidates.filter((c) => c.viaGraph === true).length,

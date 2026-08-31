@@ -56,24 +56,77 @@ const MANIFESTS: ReadonlyArray<{ file: string; ecosystem: string }> = [
 ];
 
 /** Conventional entry points, matched against the full path. */
-const ENTRY_POINTS: readonly string[] = [
-  "src/index.ts",
-  "src/index.js",
-  "src/main.ts",
-  "src/main.py",
-  "src/main.go",
-  "src/main.rs",
-  "index.ts",
-  "index.js",
-  "main.py",
-  "main.go",
-  "main.rs",
+/**
+ * Conventional entry-point candidates, generated rather than listed.
+ *
+ * The hand-written list this replaces missed ordinary layouts. sindresorhus/ky puts its
+ * entry at `source/index.ts`; the list had `src/index.ts` and nothing else close, so ky
+ * detected NO entry point and its fallback branch could not expand along imports even
+ * after expansion was proven to work. A literal list will keep being wrong, one
+ * directory name at a time.
+ *
+ * Generating the cross product of the directories and basenames people actually use,
+ * across the extensions ingestion already recognises, covers the same ground without
+ * needing an edit per convention.
+ *
+ * ORDER IS MEANINGFUL: fallbackFiles reads entry points in order, so the outer loop is
+ * directory (root first, then the common source roots) and the inner loops are basename
+ * then extension. A repository with both `index.ts` and `src/index.ts` gets the root one
+ * first, which is the one a reader opens.
+ */
+const ENTRY_POINT_DIRECTORIES: readonly string[] = ["", "src", "source", "lib", "app"];
+
+/** Basenames that mean "start here" across ecosystems. */
+const ENTRY_POINT_BASENAMES: readonly string[] = ["index", "main"];
+
+/**
+ * Extensions tried, in preference order.
+ *
+ * A subset of LANGUAGE_BY_EXTENSION and deliberately ordered rather than derived from
+ * it: object key order is not a contract, and detection that reshuffled when someone
+ * added an extension would change which file a repository reports as its entry point.
+ */
+const ENTRY_POINT_EXTENSIONS: readonly string[] = [
+  "ts", "tsx", "mts", "js", "jsx", "mjs", "cjs", "py", "go", "rs", "rb", "java", "kt",
+  "swift", "cs", "php",
+];
+
+/**
+ * Framework layouts whose entry point is not a `index`/`main` file at all. Kept as
+ * literals because there is no pattern to generate — these are specific filenames that
+ * specific frameworks give specific meaning.
+ */
+const FRAMEWORK_ENTRY_POINTS: readonly string[] = [
   "app/page.tsx",
   "app/layout.tsx",
   "pages/index.tsx",
   "cmd/main.go",
   "manage.py",
 ];
+
+/** Every candidate, in detection order. Computed once — the cross product is fixed. */
+const ENTRY_POINTS: readonly string[] = (() => {
+  const out: string[] = [];
+  for (const dir of ENTRY_POINT_DIRECTORIES) {
+    for (const base of ENTRY_POINT_BASENAMES) {
+      for (const ext of ENTRY_POINT_EXTENSIONS) {
+        out.push(dir === "" ? `${base}.${ext}` : `${dir}/${base}.${ext}`);
+      }
+    }
+  }
+  return [...out, ...FRAMEWORK_ENTRY_POINTS];
+})();
+
+/**
+ * Entry points present in a repository, in detection order.
+ *
+ * Exported so query-time selection can re-run detection against an index built before
+ * this widening existed. Re-ingesting every repository to pick up a better list is not
+ * something a user should have to know to do.
+ */
+export function detectEntryPoints(paths: ReadonlySet<string>): string[] {
+  return ENTRY_POINTS.filter((candidate) => paths.has(candidate));
+}
 
 /**
  * Paths that are never worth reading, regardless of extension. Vendored and generated
@@ -176,6 +229,7 @@ export interface IndexCoverage {
    * count is the signature of a repo whose aliases were missed entirely.
    */
   tsconfigAliasesLoaded?: boolean;
+
 }
 
 /**
@@ -189,7 +243,10 @@ export interface IndexCoverage {
  * thing. The numbers are counts, not adjectives — "312 files were indexed by path and
  * content only" is checkable; "partial coverage" is not.
  */
-export function describeCoverage(coverage: IndexCoverage | undefined): string | null {
+export function describeCoverage(
+  coverage: IndexCoverage | undefined,
+  entryPointCount?: number
+): string | null {
   if (!coverage) return null;
 
   const { indexedFiles, symbolEligibleFiles, filesWithSymbols, languagesWithoutSymbols } = coverage;
@@ -209,13 +266,15 @@ export function describeCoverage(coverage: IndexCoverage | undefined): string | 
     return (
       `${head} Symbol extraction currently supports ${SYMBOL_LANGUAGE_LABEL} only, so all ` +
       `${file(indexedFiles)} were indexed by path and content only.${found} ` +
-      `Answers still work, but questions naming a function or class are matched less precisely.`
+      `Answers still work, but questions naming a function or class are matched less precisely.` +
+      `${entryPointNote(entryPointCount)}`
     );
   }
 
   return (
     `${head} Symbol extraction currently supports ${SYMBOL_LANGUAGE_LABEL} only, so ` +
-    `${file(withoutSymbols)} were indexed by path and content only.${importNote(coverage)}`
+    `${file(withoutSymbols)} were indexed by path and content only.` +
+    `${importNote(coverage)}${entryPointNote(entryPointCount)}`
   );
 }
 
@@ -229,6 +288,25 @@ export function describeCoverage(coverage: IndexCoverage | undefined): string | 
  * imports would otherwise have no way to find out. Re-attaching the repository
  * re-ingests it; that is the fix, and it is a separate change from saying so.
  */
+/**
+ * Says so when detection found no entry point.
+ *
+ * Takes the count as an argument rather than reading it off IndexCoverage, because
+ * putting it there would have meant changing what ingestion writes. The caller already
+ * holds the detected list in the same structure blob, so nothing new is stored and
+ * repositories indexed before this change describe themselves correctly.
+ *
+ * Undefined means "not supplied", not zero: only an explicit 0 is evidence that
+ * detection ran and came back empty.
+ */
+function entryPointNote(entryPointCount: number | undefined): string {
+  if (entryPointCount !== 0) return "";
+  return (
+    " No entry point was detected for this repository, so questions that name no file" +
+    " start from the most-imported files instead of from a known starting point."
+  );
+}
+
 function importNote(coverage: IndexCoverage): string {
   if (coverage.importsExtracted === true) return "";
   if (coverage.importsExtracted === undefined) {
@@ -297,7 +375,7 @@ export function detectStructure(entries: readonly TreeEntry[]): RepoStructure {
     }
   }
 
-  const entryPoints = ENTRY_POINTS.filter((candidate) => paths.has(candidate));
+  const entryPoints = detectEntryPoints(paths);
 
   return {
     languages,

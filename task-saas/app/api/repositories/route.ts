@@ -90,6 +90,23 @@ export async function POST(req: Request): Promise<Response> {
       reused: result.reused,
     });
 
+    /**
+     * Read back to report whether an entry point was detected.
+     *
+     * One query on the attach path, which happens once per repository rather than once
+     * per message. The alternative was having ingestion carry the count out in its
+     * result, which would have meant changing ingest.ts — and the number is already
+     * stored, so re-reading it keeps a single source rather than adding a second.
+     */
+    const stored = await prisma.repository.findUnique({
+      where: { id: result.repositoryId },
+      select: { structure: true },
+    });
+    const storedStructure = stored?.structure as { entryPoints?: unknown } | null;
+    const entryPointCount = Array.isArray(storedStructure?.entryPoints)
+      ? storedStructure.entryPoints.length
+      : undefined;
+
     return NextResponse.json({
       repositoryId: result.repositoryId,
       owner: ref.owner,
@@ -110,7 +127,9 @@ export async function POST(req: Request): Promise<Response> {
        * message that always appears is one nobody reads.
        */
       coverage: result.coverage ?? null,
-      coverageNote: describeCoverage(result.coverage),
+      // The detected list lives in the same structure blob the coverage does, so the
+      // note can report "no entry point" without ingestion storing a second copy.
+      coverageNote: describeCoverage(result.coverage, entryPointCount),
     });
   } catch (error) {
     logger.error("Repository ingestion failed", {

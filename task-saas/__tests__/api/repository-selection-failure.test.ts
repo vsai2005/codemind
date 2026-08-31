@@ -222,6 +222,79 @@ describe("repository selection failure modes", () => {
     expect(prompt).toContain("src/backoff.ts");
   });
 
+  it("re-detects a widened layout the stored index missed", async () => {
+    // The ky case, at route level. The snapshot was indexed with a narrower list and
+    // stored an EMPTY entryPoints array; detection now runs again at query time, so a
+    // repository does not have to be re-ingested to benefit.
+    projectFindFirst.mockResolvedValue({
+      ...projectWith(true),
+      repository: { ...projectWith(true).repository, structure: { entryPoints: [] } },
+    });
+    repositoryFileFindMany.mockResolvedValue([
+      { id: "s1", path: "source/index.ts", size: 400, language: "typescript", symbols: [], internalSymbols: [] },
+      { id: "s2", path: "source/core.ts", size: 400, language: "typescript", symbols: [], internalSymbols: [] },
+    ]);
+    fileEdgeFindMany.mockResolvedValue([{ sourceFileId: "s1", targetFileId: "s2" }]);
+
+    const res = await POST(chatRequest("explain the overall philosophy of this codebase"));
+    await res.text().catch(() => "");
+
+    const log = selectionLog();
+    expect(log!.usedFallback).toBe(true);
+    expect(log!.entryTier).toBe("conventional");
+    expect(log!.entryPoints).toBe(1);
+    expect(log!.chosenFromGraph as number).toBeGreaterThan(0);
+  });
+
+  it("falls to structural hubs when no layout is conventional", async () => {
+    projectFindFirst.mockResolvedValue({
+      ...projectWith(true),
+      repository: { ...projectWith(true).repository, structure: { entryPoints: [] } },
+    });
+    repositoryFileFindMany.mockResolvedValue([
+      { id: "h1", path: "weird/alpha.ts", size: 400, language: "typescript", symbols: [], internalSymbols: [] },
+      { id: "h2", path: "weird/beta.ts", size: 400, language: "typescript", symbols: [], internalSymbols: [] },
+      { id: "h3", path: "weird/core.ts", size: 400, language: "typescript", symbols: [], internalSymbols: [] },
+    ]);
+    fileEdgeFindMany.mockResolvedValue([
+      { sourceFileId: "h1", targetFileId: "h3" },
+      { sourceFileId: "h2", targetFileId: "h3" },
+    ]);
+
+    const res = await POST(chatRequest("explain the overall philosophy of this codebase"));
+    await res.text().catch(() => "");
+
+    const log = selectionLog();
+    expect(log!.entryTier).toBe("structural");
+    // Asserting the EFFECT, not just the label. Setting the tier while discarding the
+    // detected paths left the previous version of this test green — the log said
+    // "structural" and the fallback still read files by depth.
+    expect(log!.entryPoints as number).toBeGreaterThan(0);
+    expect(systemPrompt()).toContain("weird/core.ts");
+  });
+
+  it("reports detection failure when nothing at all is found", async () => {
+    // No convention, and no edges to infer from. The turn still succeeds — reading by
+    // depth is worse than a known starting point but far better than refusing — and
+    // the log says which of those happened.
+    projectFindFirst.mockResolvedValue({
+      ...projectWith(true),
+      repository: { ...projectWith(true).repository, structure: { entryPoints: [] } },
+    });
+    repositoryFileFindMany.mockResolvedValue([
+      { id: "z1", path: "weird/alpha.ts", size: 400, language: "typescript", symbols: [], internalSymbols: [] },
+    ]);
+    fileEdgeFindMany.mockResolvedValue([]);
+
+    const res = await POST(chatRequest("explain the overall philosophy of this codebase"));
+    await res.text().catch(() => "");
+
+    expect(res.status).toBe(200);
+    expect(selectionLog()!.entryTier).toBe("none");
+    expect(selectionLog()!.entryPoints).toBe(0);
+    expect(selectionLog()!.fetched as number).toBeGreaterThan(0);
+  });
+
   it("behaves as before when the repository has no edges", async () => {
     // No regression for a repository whose graph is empty rather than broken.
     fileEdgeFindMany.mockResolvedValue([]);
