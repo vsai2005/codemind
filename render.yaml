@@ -9,11 +9,20 @@
 # engine, pdfkit left unbundled so its font metrics resolve). Using it means the image
 # Render runs is the image you can run locally.
 #
-# MIGRATIONS ARE NOT RUN HERE. There is no preDeployCommand, because the Prisma CLI is
-# a devDependency and Next's standalone output prunes it from the runtime image — a
-# pre-deploy step would have to fetch it from npm on every deploy, as a non-root user.
-# Run `npm run migrate:deploy` against Aiven from your machine instead. This also keeps
-# the property the Dockerfile was written for: a restart can never mutate the database.
+# MIGRATIONS RUN AS A PRE-DEPLOY STEP. This used to say the opposite, and the reason it
+# gave was real: the Prisma CLI is a devDependency, Next's standalone output prunes it,
+# and a pre-deploy step would have had to fetch it from npm on every deploy as a
+# non-root user. The Dockerfile now vendors the CLI and its schema engine into the
+# runtime image, so `preDeployCommand` runs against this exact build and depends on
+# nothing but it.
+#
+# The property that motivated the old policy is UNCHANGED: preDeployCommand runs once
+# per deploy, before the new instance serves traffic — not on restart. `migrate deploy`
+# is still absent from CMD, so a container restart still cannot mutate the database.
+#
+# What changed is who has to remember. "Apply migrations by hand from your machine" is
+# a step that gets forgotten, and cannot be performed at all by someone who does not
+# have that machine to hand.
 #
 # Every secret below is `sync: false`, so Render prompts for it once and stores it
 # encrypted. No value is committed to this file.
@@ -43,6 +52,16 @@ services:
     dockerContext: .
     healthCheckPath: /api/health
     autoDeploy: true
+
+    # Runs inside the image built above, once per deploy, before traffic is switched.
+    # A failure here ABORTS the deploy and leaves the previous version serving, which
+    # is the correct outcome: code that expects a column the database does not have
+    # would fail on live requests instead, one user at a time.
+    # The CLI lives in /opt/prisma (see Dockerfile) rather than in the app's
+    # node_modules, so it is invoked by path. --schema points at the migrations that
+    # shipped in this same image, which is what makes the step reproducible: the code
+    # being deployed and the migrations being applied are from one build.
+    preDeployCommand: node /opt/prisma/node_modules/prisma/build/index.js migrate deploy --schema=/app/prisma/schema.prisma
 
     envVars:
       # --- Required: the app aborts startup without these -------------------
@@ -86,9 +105,6 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: DEEPSEEK_API_KEY
-        sync: false
-      # Serves the Ox Alpha entry, brokered through OpenRouter.
-      - key: OPENROUTER_API_KEY
         sync: false
 
       # The Gemini model id and its label in the picker.
