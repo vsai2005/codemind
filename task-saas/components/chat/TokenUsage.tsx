@@ -59,6 +59,22 @@ export function TokenUsage({
     }
   }, []);
 
+  /**
+   * Drop the previous conversation's figure the instant the id changes.
+   *
+   * Next reuses this component across /chat/[id] navigations — same route, different
+   * param — so its state SURVIVES a conversation switch. Without this, moving from a
+   * 7,150-token conversation to a 530-token one kept showing 7,150 until the new fetch
+   * resolved, and kept showing it indefinitely if a generation happened to be running,
+   * because the fetch below is skipped while streaming.
+   *
+   * A number attached to the wrong conversation is worse than no number: it reads as a
+   * running total across the whole app, which is exactly what this component is not.
+   */
+  useEffect(() => {
+    setUsage(null);
+  }, [conversationId]);
+
   useEffect(() => {
     if (!conversationId) {
       setUsage(null);
