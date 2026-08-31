@@ -11,6 +11,32 @@ vi.mock("@/lib/logger", async (importOriginal) => {
 const repositoryUpdate = vi.fn().mockResolvedValue({});
 const createMany = vi.fn().mockResolvedValue({ count: 0 });
 
+/**
+ * Ingestion writes inside an INTERACTIVE transaction, because edges reference file ids
+ * that do not exist until the files are inserted.
+ *
+ * This mock must therefore invoke the callback. The array-form-only version it replaces
+ * did `Promise.resolve(ops)` on a non-array, which resolved the callback FUNCTION
+ * without ever calling it — every write silently did nothing while the suite still
+ * reported the transaction as having run. Both forms are handled so the harness cannot
+ * quietly stop exercising the body again.
+ */
+const tx = {
+  repository: {
+    update: (...args: unknown[]) => repositoryUpdate(...args),
+  },
+  repositoryFile: {
+    deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+    createMany: (...args: unknown[]) => createMany(...args),
+    createManyAndReturn: (...args: unknown[]) => {
+      void createMany(...args);
+      const data = (args[0] as { data: Array<{ path: string }> }).data;
+      return Promise.resolve(data.map((row, i) => ({ id: `file_${i}`, path: row.path })));
+    },
+  },
+  fileEdge: { createMany: vi.fn().mockResolvedValue({ count: 0 }) },
+};
+
 vi.mock("@/lib/db", () => ({
   prisma: {
     repository: {
@@ -23,7 +49,9 @@ vi.mock("@/lib/db", () => ({
       createMany: (...args: unknown[]) => createMany(...args),
     },
     $transaction: vi.fn((ops: unknown) =>
-      Array.isArray(ops) ? Promise.all(ops) : Promise.resolve(ops)
+      Array.isArray(ops)
+        ? Promise.all(ops)
+        : (ops as (client: typeof tx) => Promise<unknown>)(tx)
     ),
   },
 }));
@@ -112,6 +140,14 @@ describe("ingesting a repository with no JS/TS", () => {
     expect(coverage.symbolsExtracted).toBe(false);
     expect(coverage.languages).toContain("python");
     expect(coverage.languagesWithoutSymbols).toContain("python");
+
+    // The same honesty, one feature over: zero edges here means "not parsed", and
+    // importsExtracted is what says so. Without this assertion a consumer reading the
+    // graph would conclude a Python project has no internal dependencies.
+    expect(coverage.importsExtracted).toBe(false);
+    expect(coverage.importEligibleFiles).toBe(0);
+    expect(coverage.resolvedEdges).toBe(0);
+    expect(coverage.languagesWithoutImports).toContain("python");
   });
 
   it("persists that coverage on the repository row", async () => {

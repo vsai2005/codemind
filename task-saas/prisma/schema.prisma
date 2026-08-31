@@ -35,7 +35,7 @@ model User {
   passwordHash  String?
   emailVerified DateTime?
   createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt @default(now())
+  updatedAt     DateTime  @default(now()) @updatedAt
 
   tasks         Task[]
   accounts      Account[]
@@ -103,13 +103,13 @@ model VerificationToken {
 }
 
 model Project {
-  id          String         @id @default(cuid())
+  id          String   @id @default(cuid())
   name        String
   description String?
   userId      String
-  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   /// Standing instructions applied to every conversation in this project, injected
   /// through the existing ContextManager rather than a parallel context system.
@@ -146,13 +146,13 @@ model Project {
 }
 
 model Conversation {
-  id        String    @id @default(cuid())
-  title     String
-  userId    String
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  projectId String?
-  project   Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  summary   String?   @db.Text
+  id             String    @id @default(cuid())
+  title          String
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projectId      String?
+  project        Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  summary        String?   @db.Text
   /// Optimistic-concurrency guard for `summary`.
   ///
   /// Summarization is detached from the request that triggers it, so two turns in one
@@ -164,17 +164,17 @@ model Conversation {
   /// The version read alongside the summary is part of the WHERE clause on write, and
   /// bumped by it. A losing write matches no row, updates nothing, and is logged.
   /// Non-null with a default so existing rows start at 0 without a backfill.
-  summaryVersion Int @default(0)
+  summaryVersion Int       @default(0)
   /// Same contract as Project.archivedAt: presentation-only, hides the conversation
   /// from the default sidebar listing, never touches messages or artifacts. A project
   /// being archived does not cascade here — a conversation keeps its own archive state
   /// independent of its project's, so restoring a project does not silently unarchive
   /// chats the user archived individually.
-  archivedAt DateTime?
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  archivedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
-  messages  Message[]
+  messages Message[]
 
   @@index([userId])
   @@index([projectId])
@@ -283,7 +283,6 @@ model Artifact {
   @@index([userId, createdAt])
 }
 
-
 // ---------------------------------------------------------------------------
 // Repository ingestion
 // ---------------------------------------------------------------------------
@@ -321,7 +320,7 @@ enum RepositoryStatus {
 /// access-grant table) before any private URL is accepted. Do not treat the sharing
 /// here as a general property; it is a consequence of the public-only scope.
 model Repository {
-  id            String           @id @default(cuid())
+  id            String @id @default(cuid())
   /// GitHub owner and repo name, stored lowercase so lookups are case-insensitive.
   owner         String
   name          String
@@ -332,17 +331,17 @@ model Repository {
   /// Never inferred from row counts. A reader may only trust an index whose status is
   /// `ready`; anything else is partial, and answering from a partial index produces
   /// confident architectural claims about files that were never seen.
-  status        RepositoryStatus @default(pending)
+  status RepositoryStatus @default(pending)
   /// Set when status is `failed`, so the UI can say what went wrong.
-  error         String?
+  error  String?
 
   /// Extension counts, manifest, and detected entry points. Shape is owned by
   /// lib/repo/structure.ts rather than the schema, so it can grow without migrations.
-  structure     Json?
+  structure       Json?
   /// Dominant language by file count. The import graph, when it exists, covers this
   /// one language only.
   primaryLanguage String?
-  fileCount     Int              @default(0)
+  fileCount       Int     @default(0)
 
   /// Whether exported symbols were actually extracted for this snapshot.
   ///
@@ -355,13 +354,26 @@ model Repository {
   ///
   /// False for a snapshot indexed before symbol extraction existed, and for one whose
   /// archive could not be read. Both are usable, degraded, and KNOWN to be degraded.
-  symbolsExtracted Boolean       @default(false)
+  symbolsExtracted Boolean @default(false)
 
-  createdAt     DateTime         @default(now())
-  updatedAt     DateTime         @updatedAt
+  /// Whether import edges were actually extracted for this snapshot.
+  ///
+  /// Exists for exactly the reason symbolsExtracted does, and the reason is the whole
+  /// point: without it, a repository with no edges recorded is indistinguishable from
+  /// one whose imports were never parsed. A consumer would read an empty graph as "this
+  /// code has no internal dependencies" — a confident architectural claim derived from
+  /// data that was never gathered.
+  ///
+  /// False for a snapshot indexed before edges existed, for one whose archive could not
+  /// be read, and for a repository in a language whose imports are not parsed.
+  importsExtracted Boolean @default(false)
 
-  files         RepositoryFile[]
-  projects      Project[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  files     RepositoryFile[]
+  fileEdges FileEdge[]
+  projects  Project[]
 
   /// One row per snapshot. Re-ingesting the same commit finds the existing index
   /// instead of rebuilding it, which is what makes a retry after a failure cheap.
@@ -397,7 +409,7 @@ model RepositoryFile {
   /// into memory to rank it, so a reverse index buys nothing today, while a 2,000-file
   /// repository would add roughly 10,000 rows against a 1 GB quota. Promote it to a
   /// table when exact symbol lookup ("go to definition") needs one.
-  symbols      String[]   @default([])
+  symbols String[] @default([])
 
   /// Names the file declares WITHOUT exporting — class members and top-level
   /// declarations. Weighted below `symbols` when scoring, because a public contract
@@ -406,6 +418,67 @@ model RepositoryFile {
   /// case: ky's Ky.ts exports one symbol and declares the whole retry loop.
   internalSymbols String[] @default([])
 
+  /// Imports this file declares. Empty when it imports nothing, when its language is
+  /// not parsed, or when extraction never ran — Repository.importsExtracted separates
+  /// the last case from the first two.
+  outgoingEdges FileEdge[] @relation("FileEdgeSource")
+  /// Files that import THIS one. The reverse direction is why edges are a table rather
+  /// than another array column: an array of targets answers "what does this need" but
+  /// cannot answer "what breaks if I change this" without scanning every row.
+  incomingEdges FileEdge[] @relation("FileEdgeTarget")
+
   @@unique([repositoryId, path])
   @@index([repositoryId, language])
+}
+
+/// How a specifier related to the repository it was found in.
+enum FileEdgeKind {
+  /// Named another file in this snapshot. `targetFileId` is set.
+  resolved
+  /// A bare specifier — a published package or a node builtin. Nothing here to name.
+  external
+  /// Looked like it named a file here (relative, or matched a tsconfig alias) and did
+  /// not. Usually a file excluded from the index, or an alias resolved differently
+  /// from the bundler. Kept because it is a signal, not noise.
+  unresolved
+}
+
+/// A directed import edge: `sourceFile` imports `specifier`.
+///
+/// WHY UNRESOLVED EDGES ARE STORED
+/// An edge list that dropped what it could not resolve would be indistinguishable from
+/// one where those imports do not exist. The raw specifier is kept for every edge —
+/// including the ones pointing outside this repository — so a reader can always tell
+/// "this file imports nothing else here" from "this file's imports were not understood".
+/// That is the same invariant Repository.symbolsExtracted protects, at row granularity.
+///
+/// NOT YET CONSUMED. Selection does not read this table. It is written and queryable so
+/// that consuming it is a separate, reviewable change rather than a rewrite.
+model FileEdge {
+  id String @id @default(cuid())
+
+  /// Denormalised from sourceFile so the common query — every edge in one repository —
+  /// is a single index lookup rather than a join back through RepositoryFile.
+  repositoryId String
+  repository   Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  sourceFileId String
+  sourceFile   RepositoryFile @relation("FileEdgeSource", fields: [sourceFileId], references: [id], onDelete: Cascade)
+
+  /// Null for `external` and `unresolved` kinds — there is no row to point at.
+  targetFileId String?
+  targetFile   RepositoryFile? @relation("FileEdgeTarget", fields: [targetFileId], references: [id], onDelete: Cascade)
+
+  /// The specifier exactly as written in the source, before any resolution.
+  specifier String
+  kind      FileEdgeKind
+
+  createdAt DateTime @default(now())
+
+  /// Idempotency, enforced by the database rather than by the writer remembering to.
+  /// One file importing one specifier is one edge however many times the line appears
+  /// and however many times the repository is re-ingested.
+  @@unique([sourceFileId, specifier])
+  @@index([repositoryId, sourceFileId])
+  @@index([repositoryId, targetFileId])
 }

@@ -144,6 +144,38 @@ export interface IndexCoverage {
    * that could not be read. Distinct from running and finding nothing.
    */
   symbolsExtracted: boolean;
+
+  /**
+   * Import-graph coverage. Reported separately from symbol coverage because the two
+   * can differ: a repository can have its exports read and its imports not, and a
+   * single "covered" flag would hide which half is missing.
+   *
+   * Optional so a snapshot indexed before edges existed parses as itself rather than
+   * as a repository whose imports were parsed and found to be zero. That distinction
+   * is the entire reason this block exists — see FileEdge in the schema.
+   */
+  importsExtracted?: boolean;
+  /** Files whose language this extractor parses — the ceiling on edge coverage. */
+  importEligibleFiles?: number;
+  /** Files that contributed at least one edge of any kind. */
+  filesWithImports?: number;
+  /** Edges pointing at another file in this snapshot. */
+  resolvedEdges?: number;
+  /** Edges naming a package or builtin: real imports with nothing here to point at. */
+  externalEdges?: number;
+  /**
+   * Edges that looked like they named a file here and did not. Worth surfacing rather
+   * than burying: a high count usually means an alias this pipeline resolves
+   * differently from the repository's own bundler.
+   */
+  unresolvedEdges?: number;
+  /** Recognised languages present whose imports this extractor does not parse. */
+  languagesWithoutImports?: string[];
+  /**
+   * Whether a root tsconfig's `paths` were loaded. False with a high unresolvedEdges
+   * count is the signature of a repo whose aliases were missed entirely.
+   */
+  tsconfigAliasesLoaded?: boolean;
 }
 
 /**

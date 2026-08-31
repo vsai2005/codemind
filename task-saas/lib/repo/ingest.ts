@@ -12,6 +12,13 @@ import {
 import { readTarball } from "@/lib/repo/archive";
 import { extractInternalSymbols, extractSymbols, supportsSymbols } from "@/lib/repo/symbols";
 import {
+  extractImports,
+  parseTsconfigAliases,
+  resolveImport,
+  supportsImports,
+  type AliasConfig,
+} from "@/lib/repo/imports";
+import {
   detectStructure,
   languageForPath,
   primaryLanguage,
@@ -188,22 +195,51 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
      */
     const symbolsByPath = new Map<string, string[]>();
     const internalByPath = new Map<string, string[]>();
+    /**
+     * Raw import specifiers per file, collected in the SAME pass as symbols.
+     *
+     * Specifiers are stored raw and resolved after the walk, not during it, because
+     * resolution needs the complete file list: `./foo` can only be matched against
+     * foo.ts, foo/index.ts and the rest once every path is known. Resolving inline
+     * would mean either a second archive read or resolving against a half-built set,
+     * and the second is worse — it would silently mark early files unresolved.
+     */
+    const importsByPath = new Map<string, string[]>();
+    /** Root tsconfig contents, captured in the same pass for the same reason. */
+    let tsconfigSource: string | null = null;
     let symbolsExtracted = false;
+    let importsExtracted = false;
     const archiveStarted = Date.now();
 
     if (language && supportsSymbols(language)) {
       try {
         const stream = await fetchTarball(ref, meta.commitSha, { deadline });
         await readTarball(stream, (entry) => {
-          if (!supportsSymbols(languageForPath(entry.path))) return;
-          const symbols = extractSymbols(entry.content);
-          if (symbols.length > 0) symbolsByPath.set(entry.path, symbols);
-          // Internal declarations are what make a file whose meaning lives in private
-          // members findable at all — see extractInternalSymbols.
-          const internal = extractInternalSymbols(entry.content, symbols);
-          if (internal.length > 0) internalByPath.set(entry.path, internal);
+          // Captured before the language guard: tsconfig.json is JSON, so it is not a
+          // file whose symbols or imports are read, but its `paths` decide how every
+          // aliased specifier in the repository resolves.
+          if (entry.path === "tsconfig.json") tsconfigSource = entry.content;
+
+          const entryLanguage = languageForPath(entry.path);
+
+          if (supportsSymbols(entryLanguage)) {
+            const symbols = extractSymbols(entry.content);
+            if (symbols.length > 0) symbolsByPath.set(entry.path, symbols);
+            // Internal declarations are what make a file whose meaning lives in private
+            // members findable at all — see extractInternalSymbols.
+            const internal = extractInternalSymbols(entry.content, symbols);
+            if (internal.length > 0) internalByPath.set(entry.path, internal);
+          }
+
+          if (supportsImports(entryLanguage)) {
+            const specifiers = extractImports(entry.content);
+            if (specifiers.length > 0) importsByPath.set(entry.path, specifiers);
+          }
         });
         symbolsExtracted = true;
+        // Set together because they come from the same successful read. Splitting them
+        // would claim imports were parsed on a run where the archive never opened.
+        importsExtracted = true;
       } catch (error) {
         logger.warn("Symbol extraction failed; indexing by path only", {
           owner: ref.owner,
@@ -238,6 +274,45 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
       new Set(rows.map((row) => row.language).filter((l): l is string => l !== null))
     ).sort();
 
+    /**
+     * Resolve every collected specifier against the complete file list.
+     *
+     * Now, and not during the walk, because resolution is a membership test against the
+     * full set of paths — see importsByPath above. This is pure computation over data
+     * already in memory: no request, no second archive read, no file re-opened.
+     */
+    const aliases: AliasConfig | null = tsconfigSource
+      ? parseTsconfigAliases(tsconfigSource)
+      : null;
+    const pathSet = new Set(rows.map((row) => row.path));
+
+    /** One entry per (source path, specifier). Target path is null when not resolved. */
+    const edges: Array<{
+      sourcePath: string;
+      specifier: string;
+      targetPath: string | null;
+      kind: "resolved" | "external" | "unresolved";
+    }> = [];
+
+    // Array.from because the compile target predates Map iteration — same constraint
+    // the rest of this file already works within.
+    for (const [sourcePath, specifiers] of Array.from(importsByPath)) {
+      // A file that was in the archive but not in the tree cannot be an edge source:
+      // there is no row to hang the edge on. Rare, but it is a foreign key that would
+      // otherwise fail the whole transaction.
+      if (!pathSet.has(sourcePath)) continue;
+
+      for (const specifier of specifiers) {
+        const resolution = resolveImport(sourcePath, specifier, pathSet, aliases);
+        edges.push({
+          sourcePath,
+          specifier,
+          targetPath: resolution.kind === "resolved" ? resolution.path : null,
+          kind: resolution.kind,
+        });
+      }
+    }
+
     const coverage = {
       indexedFiles: rows.length,
       symbolEligibleFiles: rows.filter((row) => supportsSymbols(row.language)).length,
@@ -247,6 +322,18 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
       languages: languagesPresent,
       languagesWithoutSymbols: languagesPresent.filter((l) => !supportsSymbols(l)),
       symbolsExtracted,
+
+      // Import coverage, counted from what was actually produced. Reported even when
+      // every number is zero, because "parsed and found none" and "never parsed" are
+      // different facts and only importsExtracted tells them apart.
+      importsExtracted,
+      importEligibleFiles: rows.filter((row) => supportsImports(row.language)).length,
+      filesWithImports: new Set(edges.map((e) => e.sourcePath)).size,
+      resolvedEdges: edges.filter((e) => e.kind === "resolved").length,
+      externalEdges: edges.filter((e) => e.kind === "external").length,
+      unresolvedEdges: edges.filter((e) => e.kind === "unresolved").length,
+      languagesWithoutImports: languagesPresent.filter((l) => !supportsImports(l)),
+      tsconfigAliasesLoaded: aliases !== null,
     };
 
     const structureWithCoverage = { ...structure, coverage };
@@ -260,21 +347,78 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
      * direction. deleteMany first so a retry after an interrupted run replaces its
      * partial rows rather than colliding with them.
      */
-    await prisma.$transaction([
-      prisma.repositoryFile.deleteMany({ where: { repositoryId: repository.id } }),
-      prisma.repositoryFile.createMany({ data: rows, skipDuplicates: true }),
-      prisma.repository.update({
-        where: { id: repository.id },
-        data: {
-          status: "ready",
-          error: null,
-          fileCount: rows.length,
-          primaryLanguage: language,
-          symbolsExtracted,
-          structure: structureWithCoverage as unknown as object,
-        },
-      }),
-    ]);
+    /**
+     * INTERACTIVE transaction, where the rest of this codebase uses the array form.
+     *
+     * The array form cannot express this: edges reference RepositoryFile ids, and those
+     * ids do not exist until the files are inserted. `createManyAndReturn` hands them
+     * back in the same round trip, so the alternative — generating ids client-side to
+     * keep the array form — buys nothing and puts a second id format in the column.
+     *
+     * The atomicity guarantee is unchanged and is the reason this stays one
+     * transaction: `ready` must never be observable without the rows behind it. Edges
+     * join that guarantee rather than weakening it — a repository marked ready with
+     * files but no edges would be indistinguishable from one whose imports resolved to
+     * nothing, which is the exact confusion FileEdge exists to prevent.
+     *
+     * The timeout is explicit because the default is 5s and this now does three writes
+     * over up to MAX_INDEXED_FILES rows plus their edges. Reaching the default and
+     * rolling back would leave the repository in `indexing` forever, which reads to a
+     * user as a hang rather than a failure.
+     */
+    await prisma.$transaction(
+      async (tx) => {
+        // deleteMany first so a retry after an interrupted run replaces its partial
+        // rows rather than colliding with them. Edges cascade from the files, so this
+        // one statement is also what makes re-ingestion idempotent for the graph.
+        await tx.repositoryFile.deleteMany({ where: { repositoryId: repository.id } });
+
+        const written = await tx.repositoryFile.createManyAndReturn({
+          data: rows,
+          skipDuplicates: true,
+          select: { id: true, path: true },
+        });
+
+        const idByPath = new Map(written.map((row) => [row.path, row.id]));
+
+        const edgeRows = edges.flatMap((edge) => {
+          const sourceFileId = idByPath.get(edge.sourcePath);
+          // Cannot happen for rows just written, and checked anyway: a missing id here
+          // would be a foreign key violation that fails the whole ingestion, and
+          // dropping one edge is a far better outcome than losing the index.
+          if (!sourceFileId) return [];
+          return [
+            {
+              repositoryId: repository.id,
+              sourceFileId,
+              targetFileId: edge.targetPath ? (idByPath.get(edge.targetPath) ?? null) : null,
+              specifier: edge.specifier,
+              kind: edge.kind,
+            },
+          ];
+        });
+
+        if (edgeRows.length > 0) {
+          // skipDuplicates against the (sourceFileId, specifier) unique index: the
+          // database, not this loop, is what guarantees one edge per import.
+          await tx.fileEdge.createMany({ data: edgeRows, skipDuplicates: true });
+        }
+
+        await tx.repository.update({
+          where: { id: repository.id },
+          data: {
+            status: "ready",
+            error: null,
+            fileCount: rows.length,
+            primaryLanguage: language,
+            symbolsExtracted,
+            importsExtracted,
+            structure: structureWithCoverage as unknown as object,
+          },
+        });
+      },
+      { timeout: 60_000, maxWait: 15_000 }
+    );
 
     /**
      * Duration and size are logged from the first version on purpose.
@@ -294,6 +438,11 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
       symbolsExtracted,
       filesWithSymbols: symbolsByPath.size,
       filesWithInternalSymbols: internalByPath.size,
+      importsExtracted,
+      edges: edges.length,
+      resolvedEdges: edges.filter((e) => e.kind === "resolved").length,
+      unresolvedEdges: edges.filter((e) => e.kind === "unresolved").length,
+      tsconfigAliasesLoaded: aliases !== null,
       archiveMs,
       totalMs: Date.now() - ingestStarted,
     });
