@@ -1,3 +1,4 @@
+import { maskNonCode } from "./mask-code";
 /**
  * Import/require extraction and resolution, for JavaScript and TypeScript.
  *
@@ -132,19 +133,45 @@ export function scanImports(source: string): ImportScan {
   const seen = new Set<string>();
   let status: ImportScanStatus = "complete";
 
+  /**
+   * Patterns run against a copy with comments and literal interiors blanked out, and
+   * specifiers are then read from the ORIGINAL at the same offsets.
+   *
+   * Matching on the masked copy is what stops a commented-out require from becoming a
+   * specifier; reading from the original is what stops the specifier being filler. The
+   * masker preserves length exactly, so the two agree position for position — and so
+   * the truncation cap and the unread count below still see a file of the same shape.
+   */
+  const masked = maskNonCode(source);
+
   try {
     for (const pattern of IMPORT_PATTERNS) {
       pattern.lastIndex = 0;
       let match: RegExpExecArray | null;
-      while ((match = pattern.exec(source)) !== null) {
-        const specifier = match[1]?.trim();
+      while ((match = pattern.exec(masked)) !== null) {
+        /**
+         * Recover the specifier from the ORIGINAL source at the same offsets.
+         *
+         * The `d` flag would give the group's position directly, but it needs an ES2022
+         * target this project does not use — the same ceiling that rules out bigint
+         * literals. The arithmetic below is equivalent here: the captured group is a run
+         * of mask filler, and the surrounding pattern cannot contain a second literal
+         * (`[^'"]*?` cannot cross a quote), so its first occurrence inside the match is
+         * unambiguous.
+         */
+        const captured = match[1] ?? "";
+        const relative = match[0].indexOf(captured);
+        const specifier =
+          relative >= 0
+            ? source.slice(match.index + relative, match.index + relative + captured.length).trim()
+            : captured.trim();
         if (!specifier || seen.has(specifier)) continue;
         seen.add(specifier);
         found.push(specifier);
         if (found.length >= MAX_IMPORTS_PER_FILE) {
           // Not "complete with a lot of imports": the rest of the file was never read,
           // and a caller deciding whether every import resolves must know that.
-          return { specifiers: found, status: "truncated", unread: countUnread(source) };
+          return { specifiers: found, status: "truncated", unread: countUnread(masked) };
         }
       }
     }
@@ -162,7 +189,7 @@ export function scanImports(source: string): ImportScan {
     status = "aborted";
   }
 
-  return { specifiers: found, status, unread: countUnread(source) };
+  return { specifiers: found, status, unread: countUnread(masked) };
 }
 
 /** Import-like constructs with a non-literal target. Never throws. */
