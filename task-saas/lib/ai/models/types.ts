@@ -35,6 +35,21 @@ export interface ModelDescriptor {
   providerLabel: string;
   /** Real API model id sent to the provider. Server-side only. */
   providerModelId: string;
+  /**
+   * How long to wait for this model's response HEADERS before giving up, in ms.
+   *
+   * Omitted for every model that answers promptly — they use the deployment-wide
+   * default. Set it only for a model measured to be slow to first byte, and say what
+   * was measured: this number exists to keep one slow model from forcing a loose
+   * timeout on all the fast ones.
+   */
+  headerTimeoutMs?: number;
+  /**
+   * Short warning shown beside this model in the picker, for a model that works but
+   * makes the user wait. Distinct from `comingSoon`, which means "cannot be chosen":
+   * this one can, and the point is that the choice is informed rather than a surprise.
+   */
+  slowNotice?: string;
   /** Context window the provider supports for this model. */
   providerContextTokens: number;
   maxOutputTokens: number;
@@ -64,6 +79,8 @@ export interface ClientModelInfo {
   available: boolean;
   /** True for a model that is listed but not yet selectable. See ModelDescriptor. */
   comingSoon: boolean;
+  /** Latency warning for a selectable but slow model, or null. See ModelDescriptor. */
+  slowNotice: string | null;
 }
 
 /**

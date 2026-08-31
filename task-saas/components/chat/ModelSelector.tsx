@@ -27,6 +27,7 @@ export interface ClientModelInfo {
   supportsVision: boolean;
   available: boolean;
   comingSoon: boolean;
+  slowNotice: string | null;
 }
 
 interface ModelsResponse {
@@ -68,6 +69,7 @@ function parseModelsResponse(body: unknown): ModelsResponse | null {
       supportsVision: candidate.supportsVision === true,
       available: candidate.available !== false,
       comingSoon: candidate.comingSoon === true,
+      slowNotice: typeof candidate.slowNotice === "string" ? candidate.slowNotice : null,
     });
   }
 
@@ -357,6 +359,13 @@ export function ModelSelector({ value, onChange, disabled }: ModelSelectorProps)
                     {!model.available && (
                       <span className="shrink-0 rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
                         {model.comingSoon ? "Coming soon" : "Unavailable"}
+                      </span>
+                    )}
+                    {model.available && model.slowNotice && (
+                      // Amber, not grey: this is a caution about what picking it costs,
+                      // not a neutral label like the provider name below.
+                      <span className="shrink-0 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+                        {model.slowNotice}
                       </span>
                     )}
                   </span>

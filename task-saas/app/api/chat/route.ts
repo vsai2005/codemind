@@ -1,5 +1,6 @@
 import { streamText, generateText, type LanguageModelV1 } from "ai";
 import { NextResponse } from "next/server";
+import { HEADER_TIMEOUT_HEADER } from "@/lib/ai/fetch-timeout";
 import { getVisionModel, nemotronOptions, NO_CAPACITY_CODE } from "@/lib/ai/gateway";
 import { getDefaultModelId, getNvidiaVisionModelId, resolveModel } from "@/lib/ai/models/registry";
 import { sdkRetriesFor } from "@/lib/ai/models/providers";
@@ -775,6 +776,23 @@ export async function POST(req: Request): Promise<Response> {
     let model = resolved.model;
     let modelOptions: Record<string, unknown> = resolved.descriptor.provider === "nvidia" ? nemotronOptions : {};
     let effectiveProviderModelId = resolved.descriptor.providerModelId;
+
+    /**
+     * A model measured to be slow to first byte carries its own header-phase budget.
+     * Sent as a request header because a shared provider instance offers no other
+     * per-call channel that reaches the custom `fetch`; fetch-timeout.ts strips it
+     * before the request leaves, so no provider ever sees it.
+     *
+     * Deliberately applied HERE and not after the vision branch below: that branch
+     * swaps in a different model and resets modelOptions, which correctly drops this
+     * budget along with it. The timeout belongs to the model actually being called.
+     */
+    if (resolved.descriptor.headerTimeoutMs) {
+      modelOptions = {
+        ...modelOptions,
+        headers: { [HEADER_TIMEOUT_HEADER]: String(resolved.descriptor.headerTimeoutMs) },
+      };
+    }
 
     if (image && !resolved.descriptor.supportsVision) {
       if (resolved.descriptor.provider === "nvidia") {

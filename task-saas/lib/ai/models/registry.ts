@@ -124,6 +124,26 @@ function buildRegistry(): ModelDescriptor[] {
       provider: "nvidia",
       providerLabel: "NVIDIA",
       providerModelId: process.env.KIMI_MODEL || "moonshotai/kimi-k3",
+      /**
+       * MEASURED 2026-08-31: 175s, 179s, 186s and 197s to response headers across four
+       * runs, versus 0.4s for Nemotron on the same endpoint and the same key. Kimi
+       * buffers its entire reasoning pass before sending headers, and the delay is
+       * fixed overhead — a one-word "hi" costs the same as a long prompt, and
+       * reasoning_effort makes no difference ("medium" is rejected outright with a 400).
+       *
+       * Under the 60s default this model could not answer at all: the gateway timed
+       * out, cooled down a key, failed over, and repeated until the request 504'd after
+       * three minutes having burned three keys. 240s leaves headroom over the slowest
+       * run observed without reaching the 300s ceiling in fetch-timeout.ts.
+       *
+       * This is a workaround for someone else's queue, not a property of the model
+       * worth keeping forever. If NVIDIA's endpoint speeds up, delete the line.
+       */
+      headerTimeoutMs: 240_000,
+      // The user-facing half of the same measurement. Kimi is selectable and does
+      // answer, so the honest thing is to let people choose it knowing the cost —
+      // silently taking three minutes is what makes an app feel broken.
+      slowNotice: "~3 min to first reply",
       providerContextTokens: KIMI_K3_CONTEXT_TOKENS,
       maxOutputTokens: KIMI_K3_MAX_OUTPUT_TOKENS,
       supportsStreaming: true,
@@ -217,6 +237,7 @@ export function listModelsForClient(): ClientModelInfo[] {
     available:
       !descriptor.comingSoon && getProviderAdapter(descriptor.provider).isConfigured(),
     comingSoon: descriptor.comingSoon ?? false,
+    slowNotice: descriptor.slowNotice ?? null,
   }));
 }
 
