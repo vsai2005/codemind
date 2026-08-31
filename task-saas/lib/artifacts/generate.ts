@@ -2,7 +2,7 @@ import { generateText, type LanguageModelV1 } from "ai";
 import { getModel } from "@/lib/ai/gateway";
 import { parseArtifactOutput } from "./parse";
 import { validateArtifact } from "./validate";
-import { verifyArtifact, type VerificationReport } from "./verify";
+import { verifyArtifact, type ArtifactStage, type VerificationReport } from "./verify";
 import { scrubForLog } from "@/lib/ai/failure-classification";
 import { getArtifactOutputTokenLimit } from "@/lib/env";
 import { ARTIFACT_LIMITS, type ArtifactType, type NormalizedArtifact } from "./types";
@@ -116,6 +116,12 @@ export type ArtifactGeneration =
       ok: false;
       errors: string[];
       /**
+       * Which stage rejected it. Always set, because a failure that cannot say where it
+       * happened is not measurable — and the responses differ: rising truncation means
+       * the output budget is wrong, rising verification means the prompt is.
+       */
+      stage: ArtifactStage;
+      /**
        * Present only when verification is what rejected the artifact. Absent for the
        * earlier failures — a generation that never parsed has nothing to verify, and
        * an empty report there would read as "checked and found nothing wrong".
@@ -205,13 +211,18 @@ export async function generateArtifact(
     // Scrubbed because this string is logged, streamed to the browser, AND persisted
     // as message content. Provider errors are the one place credentials could ever be
     // echoed back, so it must never pass through raw.
-    return { ok: false, errors: [`artifact generation failed: ${scrubForLog(message)}`] };
+    return {
+      ok: false,
+      stage: "generation",
+      errors: [`artifact generation failed: ${scrubForLog(message)}`],
+    };
   }
 
   // Hitting the token ceiling means the tail of the project is missing. Do not salvage.
   if (finishReason === "length") {
     return {
       ok: false,
+      stage: "truncation",
       errors: [
         "the project was larger than one generation can hold, so the output was cut off",
       ],
@@ -222,12 +233,13 @@ export async function generateArtifact(
   if (!parsed.artifact || parsed.errors.length > 0) {
     return {
       ok: false,
+      stage: "parse",
       errors: parsed.errors.length > 0 ? parsed.errors : ["the model produced no usable artifact"],
     };
   }
 
   const validation = validateArtifact(parsed.artifact, type);
-  if (!validation.ok) return { ok: false, errors: validation.errors };
+  if (!validation.ok) return { ok: false, stage: "validation", errors: validation.errors };
 
   /**
    * Static verification, after per-file validation and before anything is persisted.
@@ -247,6 +259,7 @@ export async function generateArtifact(
   if (!verification.ok) {
     return {
       ok: false,
+      stage: "verification",
       errors: verification.errors.map((finding) => finding.message),
       verification,
     };

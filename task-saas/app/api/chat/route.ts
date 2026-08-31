@@ -22,7 +22,12 @@ import {
 } from "@/lib/attachments";
 import { detectArtifactIntent } from "@/lib/ai/intent";
 import { generateArtifact } from "@/lib/artifacts/generate";
-import { describeWarnings, type VerificationReport } from "@/lib/artifacts/verify";
+import {
+  attemptFromReport,
+  describeWarnings,
+  type ArtifactAttempt,
+  type VerificationReport,
+} from "@/lib/artifacts/verify";
 import { createArtifactStreamResponse } from "@/lib/artifacts/stream";
 import { buildArtifactBytes } from "@/lib/artifacts/build";
 import { enforceRateLimit, acquireGenerationSlot, concurrentGenerationLimit } from "@/lib/rate-limit";
@@ -1245,6 +1250,11 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
           provider,
           model: providerModelId,
           plan,
+          // Recorded on the FAILURE path too, which is the entire point: without a row
+          // here, rejected artifacts are invisible and every measurable rate is 100%.
+          attempt: generation.verification
+            ? attemptFromReport(generation.verification, intent)
+            : { ok: false, stage: generation.stage, type: intent, warningCount: 0, version: 1 },
         });
         writer.text(visible);
         await summarizeDropped(conversationId, userId, existingSummary, existingSummaryVersion, droppedMessagesContent);
@@ -1278,6 +1288,16 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
           provider,
           model: providerModelId,
           plan,
+          // A packaging failure is a real failed attempt even though the artifact was
+          // valid. Counting it as a success because verification passed would hide the
+          // one stage where a correct project still reaches nobody.
+          attempt: {
+            ok: false,
+            stage: "packaging",
+            type: intent,
+            warningCount: 0,
+            version: 1,
+          },
         });
         writer.text(visible);
         await summarizeDropped(conversationId, userId, existingSummary, existingSummaryVersion, droppedMessagesContent);
@@ -1320,7 +1340,19 @@ ${warningNote}`
           userId,
           verification: generation.verification,
         },
-        { provider, model: providerModelId, plan, usage: generation.usage }
+        {
+          provider,
+          model: providerModelId,
+          plan,
+          usage: generation.usage,
+          attempt: {
+            ok: true,
+            stage: "persisted",
+            type: intent,
+            warningCount: generation.verification.warnings.length,
+            version: 1,
+          },
+        }
       );
 
       writer.progress("ready", "Your download is ready.");
@@ -1369,6 +1401,12 @@ async function persistTurn(
     model: string;
     plan?: ChatPlan | null;
     /**
+     * Outcome of an artifact attempt, written whether it succeeded or failed. This is
+     * the only record a REJECTED artifact leaves, and the reason a success rate can be
+     * computed at all — see Message.artifactAttempt.
+     */
+    attempt?: ArtifactAttempt;
+    /**
      * Provider-reported usage for the generation that produced `visibleText`.
      * Null per field means not reported — never zero. Omitted entirely by callers
      * that had no generation to measure, such as a failure notice.
@@ -1392,6 +1430,11 @@ async function persistTurn(
       // collapse into the same stored value.
       promptTokens: origin?.usage?.promptTokens ?? null,
       completionTokens: origin?.usage?.completionTokens ?? null,
+      // Undefined for every non-artifact turn, which Prisma omits — leaving null, the
+      // documented "this was not an artifact attempt".
+      artifactAttempt: origin?.attempt
+        ? (origin.attempt as unknown as Prisma.InputJsonValue)
+        : undefined,
     },
   });
 

@@ -244,7 +244,22 @@ model Message {
   /// existing rows and every assistant message stay valid.
   idempotencyKey String? @unique
 
-  artifacts Artifact[]
+  artifacts       Artifact[]
+  /// Outcome of one artifact ATTEMPT, when this turn was an artifact turn.
+  ///
+  /// Exists because Artifact.verification cannot measure what it was meant to. A
+  /// rejected artifact is never persisted, so the Artifact table holds only successes
+  /// and any success rate computed from it is 100% by construction. This row is written
+  /// whether the attempt succeeded or failed, which is what makes the rate real.
+  ///
+  /// Deliberately NOT a copy of the verification report: it records the STAGE that
+  /// ended the attempt — generation, truncation, parse, validation, verification,
+  /// packaging, persisted — plus counts and codes. Those stages call for opposite
+  /// responses, and collapsing them into "failed" would make the measurement useless.
+  ///
+  /// Null means this turn was not an artifact attempt, or predates this column. It
+  /// never means an attempt that succeeded silently.
+  artifactAttempt Json?
 
   @@index([conversationId])
   /// Backs ordered message loads and the historical-retrieval scan.

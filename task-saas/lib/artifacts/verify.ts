@@ -466,3 +466,71 @@ export function describeWarnings(report: VerificationReport, limit = 4): string 
     ...shown,
   ].join("\n");
 }
+
+/**
+ * Where an artifact attempt ended.
+ *
+ * Recorded per attempt so success rate is measurable at all. The verification report
+ * cannot answer that on its own: a rejected artifact is never persisted, so the
+ * Artifact table contains only successes and any rate computed from it is 100%.
+ *
+ * The stages are ordered as the pipeline runs them, and each one fails for a different
+ * reason that needs a different fix:
+ *   generation   the provider call itself failed
+ *   truncation   the model hit the output ceiling, so the tail is missing
+ *   parse        the wire format was malformed
+ *   validation   a file was unsafe, oversized, or individually incomplete
+ *   verification the files were each fine and did not form a coherent project
+ *   packaging    the ZIP or PDF could not be built from a valid artifact
+ *   persisted    it worked
+ *
+ * Collapsing these into "failed" would make the measurement useless: a truncation rate
+ * that climbs means the output budget is wrong, and a verification rate that climbs
+ * means the prompt is wrong. Those are opposite responses.
+ */
+export type ArtifactStage =
+  | "generation"
+  | "truncation"
+  | "parse"
+  | "validation"
+  | "verification"
+  | "packaging"
+  | "persisted";
+
+/**
+ * One artifact attempt, in the smallest shape that supports measurement.
+ *
+ * Deliberately NOT a copy of the VerificationReport. The report describes an artifact
+ * that exists; this describes an attempt, most of which produce no artifact at all. It
+ * carries counts and codes rather than findings because it is written on every attempt
+ * and its job is to be aggregated, not read one row at a time.
+ */
+export interface ArtifactAttempt {
+  ok: boolean;
+  stage: ArtifactStage;
+  /** Which artifact type was asked for, so rates can be split by kind. */
+  type: string;
+  /** Present only for a verification failure — the checks that produced errors. */
+  failedChecks?: CheckName[];
+  /** Present only for a verification failure — what kind of problems they were. */
+  errorCodes?: FindingCode[];
+  /** Warnings on a SUCCESSFUL attempt. Zero on any failure, which had none to raise. */
+  warningCount: number;
+  version: 1;
+}
+
+/** Build the attempt record for a verification failure, from its report. */
+export function attemptFromReport(
+  report: VerificationReport,
+  type: string
+): ArtifactAttempt {
+  return {
+    ok: false,
+    stage: "verification",
+    type,
+    failedChecks: report.checks.filter((c) => c.status === "failed").map((c) => c.check),
+    errorCodes: report.errors.map((e) => e.code),
+    warningCount: 0,
+    version: 1,
+  };
+}

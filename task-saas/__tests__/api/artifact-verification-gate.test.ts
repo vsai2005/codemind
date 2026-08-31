@@ -219,3 +219,141 @@ describe("artifact verification gate", () => {
     expect(stored.warnings).toHaveLength(1);
   });
 });
+
+/** The artifact-attempt record written on the assistant message, whatever the outcome. */
+const attempt = (): {
+  ok: boolean;
+  stage: string;
+  type: string;
+  failedChecks?: string[];
+  errorCodes?: string[];
+  warningCount: number;
+  version: number;
+} => {
+  const write = vi
+    .mocked(prisma.message.create)
+    .mock.calls.find(
+      (c: unknown[]) => (c[0] as { data?: { role?: string } })?.data?.role === "assistant"
+    );
+  return (write?.[0] as { data: { artifactAttempt: unknown } })?.data?.artifactAttempt as never;
+};
+
+describe("artifact attempt recording", () => {
+  beforeEach(() => {
+    vi.mocked(auth).mockResolvedValue({ user: { id: "user-1" } } as never);
+    process.env.NVIDIA_API_KEY = "nvapi-testkeytestkeytestkeytestkey";
+    __resetRateLimits();
+    __resetScheduler();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    delete process.env.NVIDIA_API_KEY;
+  });
+
+  it("records a REJECTED attempt, which is the only trace it leaves", async () => {
+    // Artifact.verification cannot measure success rate: a rejected artifact writes no
+    // Artifact row, so a rate computed from that table is 100% by construction. This
+    // row is what makes the denominator real.
+    generateText.mockResolvedValue({
+      text: zipOutput(INCOHERENT),
+      finishReason: "stop",
+      usage: { promptTokens: 100, completionTokens: 200 },
+    });
+
+    const res = await POST(artifactRequest());
+    await res.text();
+
+    expect(vi.mocked(prisma.artifact.create).mock.calls).toHaveLength(0);
+
+    const record = attempt();
+    expect(record.ok).toBe(false);
+    expect(record.stage).toBe("verification");
+    expect(record.failedChecks).toContain("imports-resolve");
+    expect(record.errorCodes).toContain("unresolved-internal-import");
+  });
+
+  it("records a successful attempt with its warning count", async () => {
+    generateText.mockResolvedValue({
+      text: zipOutput(WITH_WARNING),
+      finishReason: "stop",
+      usage: { promptTokens: 100, completionTokens: 200 },
+    });
+
+    const res = await POST(artifactRequest());
+    await res.text();
+
+    const record = attempt();
+    expect(record.ok).toBe(true);
+    expect(record.stage).toBe("persisted");
+    expect(record.warningCount).toBe(1);
+  });
+
+  it("distinguishes truncation from verification, because the fixes differ", async () => {
+    // A rising truncation rate means the output budget is wrong; a rising verification
+    // rate means the prompt is. Collapsing both into "failed" would make the number
+    // unusable for the decision it exists to inform.
+    generateText.mockResolvedValue({
+      text: zipOutput(COHERENT),
+      finishReason: "length",
+      usage: { promptTokens: 100, completionTokens: 200 },
+    });
+
+    const res = await POST(artifactRequest());
+    await res.text();
+
+    const record = attempt();
+    expect(record.ok).toBe(false);
+    expect(record.stage).toBe("truncation");
+    // No verification report exists for a failure this early, and the record must not
+    // invent one — an empty failedChecks list would read as "checked, nothing failed".
+    expect(record.failedChecks).toBeUndefined();
+  });
+
+  it("records a parse failure as parse, not as a verification problem", async () => {
+    generateText.mockResolvedValue({
+      text: "the model just replied with prose and no tags at all",
+      finishReason: "stop",
+      usage: { promptTokens: 100, completionTokens: 200 },
+    });
+
+    const res = await POST(artifactRequest());
+    await res.text();
+
+    expect(attempt().stage).toBe("parse");
+  });
+
+  it("records a per-file validation failure as validation", async () => {
+    // An empty file is rejected by validateArtifact before verification ever runs.
+    generateText.mockResolvedValue({
+      text: zipOutput({ ...COHERENT, "src/blank.ts": "" }),
+      finishReason: "stop",
+      usage: { promptTokens: 100, completionTokens: 200 },
+    });
+
+    const res = await POST(artifactRequest());
+    await res.text();
+
+    expect(attempt().stage).toBe("validation");
+  });
+
+  it("leaves the record absent on an ordinary chat turn", async () => {
+    // Null means "not an artifact attempt". A zero-valued record here would put
+    // non-artifact turns into the denominator of every rate.
+    generateText.mockResolvedValue({ text: "", finishReason: "stop" });
+
+    const res = await POST(
+      new Request("http://localhost:3000/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "Explain how closures capture scope in JavaScript." }],
+          conversationId: "conv_1",
+        }),
+      })
+    );
+    await res.text().catch(() => "");
+
+    expect(attempt()).toBeUndefined();
+  });
+});
