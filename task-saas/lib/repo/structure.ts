@@ -240,7 +240,149 @@ export interface IndexCoverage {
 }
 
 /**
- * Coverage as one sentence, or null when there is nothing worth saying.
+ * Everything this index cannot do, as data rather than as a sentence.
+ *
+ * WHY THIS REPLACED STRING CONCATENATION
+ * The note started as one sentence about unsupported languages. It then grew an import
+ * clause, an entry-point clause and an incomplete-scan clause, each appended by a
+ * helper interpolated into the return value — and there were TWO return paths, so a new
+ * clause had to be remembered in both. One already had not been: the branch for a
+ * repository with no symbols at all appended the entry-point note but not the import
+ * note, so a Python repository built by an older extractor reported neither fact. That
+ * is the failure this shape prevents, not a hypothetical.
+ *
+ * A fifth limitation is now one entry in the list below, visible to every caller, with
+ * no return path to keep in step.
+ */
+export type CoverageLimitationCode =
+  | "symbols-unsupported"
+  | "symbols-partial"
+  | "imports-pre-feature"
+  | "imports-not-parsed"
+  | "imports-incomplete"
+  | "no-entry-point"
+  | "stale-extractor";
+
+export interface CoverageLimitation {
+  code: CoverageLimitationCode;
+  /** One sentence, safe to show a user. */
+  message: string;
+}
+
+/** Extra facts the caller holds that are not part of IndexCoverage itself. */
+export interface CoverageContext {
+  /** How many entry points detection found. Undefined means "not supplied". */
+  entryPointCount?: number;
+  /** Stored derivation version. Undefined means "not supplied"; null means unknown. */
+  derivationVersion?: number | null;
+  /** Current derivation version, for comparison. */
+  currentDerivationVersion?: number;
+}
+
+/**
+ * Every limitation of this index, in reporting order.
+ *
+ * Returns an empty array for a fully covered index. Exported so a caller that wants to
+ * act on a specific limitation — rather than print all of them — can, which is what a
+ * string could never support.
+ */
+export function coverageLimitations(
+  coverage: IndexCoverage | undefined,
+  context: CoverageContext = {}
+): CoverageLimitation[] {
+  if (!coverage) return [];
+
+  const out: CoverageLimitation[] = [];
+  const file = (n: number): string => `${n.toLocaleString("en-US")} file${n === 1 ? "" : "s"}`;
+  const { indexedFiles, symbolEligibleFiles, filesWithSymbols, languagesWithoutSymbols } = coverage;
+  const withoutSymbols = indexedFiles - filesWithSymbols;
+
+  // --- symbols ---------------------------------------------------------------
+  if (withoutSymbols > 0) {
+    if (!coverage.symbolsExtracted || symbolEligibleFiles === 0) {
+      const found =
+        languagesWithoutSymbols.length > 0
+          ? ` Detected: ${languagesWithoutSymbols.join(", ")}.`
+          : "";
+      out.push({
+        code: "symbols-unsupported",
+        message:
+          `Symbol extraction currently supports ${SYMBOL_LANGUAGE_LABEL} only, so all ` +
+          `${file(indexedFiles)} were indexed by path and content only.${found} ` +
+          `Answers still work, but questions naming a function or class are matched less precisely.`,
+      });
+    } else {
+      out.push({
+        code: "symbols-partial",
+        message:
+          `Symbol extraction currently supports ${SYMBOL_LANGUAGE_LABEL} only, so ` +
+          `${file(withoutSymbols)} were indexed by path and content only.`,
+      });
+    }
+  }
+
+  // --- imports ---------------------------------------------------------------
+  if (coverage.importsExtracted === undefined) {
+    out.push({
+      code: "imports-pre-feature",
+      message:
+        "This repository was indexed before import extraction existed, so related files" +
+        " are not followed along imports. Re-attach it to rebuild the index.",
+    });
+  } else if (coverage.importsExtracted === false) {
+    out.push({
+      code: "imports-not-parsed",
+      message:
+        "Imports were not parsed for this repository, so related files are not followed" +
+        " along imports.",
+    });
+  } else {
+    const incomplete = coverage.filesWithIncompleteImportScan ?? 0;
+    if (incomplete > 0) {
+      out.push({
+        code: "imports-incomplete",
+        message:
+          `Imports could not be fully read in ${file(incomplete)}, so the import graph` +
+          ` for ${incomplete === 1 ? "it" : "those"} is incomplete.`,
+      });
+    }
+  }
+
+  // --- entry points ----------------------------------------------------------
+  if (context.entryPointCount === 0) {
+    out.push({
+      code: "no-entry-point",
+      message:
+        "No entry point was detected for this repository, so questions that name no file" +
+        " start from the most-imported files instead of from a known starting point.",
+    });
+  }
+
+  // --- extractor version -----------------------------------------------------
+  // Reported LAST because it subsumes the others: everything above describes what this
+  // index can do, and this says the index was built by code that has since improved.
+  if (
+    typeof context.currentDerivationVersion === "number" &&
+    context.derivationVersion !== undefined &&
+    !(
+      typeof context.derivationVersion === "number" &&
+      context.derivationVersion >= context.currentDerivationVersion
+    )
+  ) {
+    out.push({
+      code: "stale-extractor",
+      message:
+        "This index was built by an older version of the code that reads imports and" +
+        " symbols, so some of its results are out of date. Re-attaching the repository" +
+        " rebuilds it.",
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Coverage as one paragraph, or null when there is nothing worth saying.
  *
  * Null on a fully covered index: a message that always appears is noise, and a user
  * whose JavaScript repo indexed completely does not need telling that JavaScript is
@@ -252,93 +394,15 @@ export interface IndexCoverage {
  */
 export function describeCoverage(
   coverage: IndexCoverage | undefined,
-  entryPointCount?: number
+  context: CoverageContext = {}
 ): string | null {
-  if (!coverage) return null;
-
-  const { indexedFiles, symbolEligibleFiles, filesWithSymbols, languagesWithoutSymbols } = coverage;
-  const withoutSymbols = indexedFiles - filesWithSymbols;
-  if (withoutSymbols <= 0) return null;
+  const limitations = coverageLimitations(coverage, context);
+  if (limitations.length === 0 || !coverage) return null;
 
   const file = (n: number): string => `${n.toLocaleString("en-US")} file${n === 1 ? "" : "s"}`;
-  const head = `Indexed ${file(indexedFiles)}.`;
-
-  // Extraction never ran: an unsupported primary language, or an unreadable archive.
-  // Naming the supported set is the actionable part — it says what WOULD work.
-  if (!coverage.symbolsExtracted || symbolEligibleFiles === 0) {
-    const found =
-      languagesWithoutSymbols.length > 0
-        ? ` Detected: ${languagesWithoutSymbols.join(", ")}.`
-        : "";
-    return (
-      `${head} Symbol extraction currently supports ${SYMBOL_LANGUAGE_LABEL} only, so all ` +
-      `${file(indexedFiles)} were indexed by path and content only.${found} ` +
-      `Answers still work, but questions naming a function or class are matched less precisely.` +
-      `${entryPointNote(entryPointCount)}`
-    );
-  }
-
-  return (
-    `${head} Symbol extraction currently supports ${SYMBOL_LANGUAGE_LABEL} only, so ` +
-    `${file(withoutSymbols)} were indexed by path and content only.` +
-    `${importNote(coverage)}${entryPointNote(entryPointCount)}`
-  );
+  return [`Indexed ${file(coverage.indexedFiles)}.`, ...limitations.map((l) => l.message)].join(" ");
 }
 
-/**
- * Says so when this snapshot has no import graph, appended to the coverage note.
- *
- * `importsExtracted` is OPTIONAL on IndexCoverage, and undefined is the load-bearing
- * case: it means the snapshot was indexed before import extraction existed at all.
- * Those repositories have the feature switched off and no edge rows, and nothing
- * re-indexes them automatically — so a user asking why answers never widen along
- * imports would otherwise have no way to find out. Re-attaching the repository
- * re-ingests it; that is the fix, and it is a separate change from saying so.
- */
-/**
- * Says so when detection found no entry point.
- *
- * Takes the count as an argument rather than reading it off IndexCoverage, because
- * putting it there would have meant changing what ingestion writes. The caller already
- * holds the detected list in the same structure blob, so nothing new is stored and
- * repositories indexed before this change describe themselves correctly.
- *
- * Undefined means "not supplied", not zero: only an explicit 0 is evidence that
- * detection ran and came back empty.
- */
-function entryPointNote(entryPointCount: number | undefined): string {
-  if (entryPointCount !== 0) return "";
-  return (
-    " No entry point was detected for this repository, so questions that name no file" +
-    " start from the most-imported files instead of from a known starting point."
-  );
-}
-
-function importNote(coverage: IndexCoverage): string {
-  if (coverage.importsExtracted === true) {
-    const incomplete = coverage.filesWithIncompleteImportScan ?? 0;
-    if (incomplete === 0) return "";
-    // Said out loud rather than left in the numbers: an edge count that looks healthy
-    // can still be a floor, and a reader comparing two repositories deserves to know
-    // which one's graph is partial.
-    return (
-      ` Imports could not be fully read in ${incomplete} file${incomplete === 1 ? "" : "s"},` +
-      ` so the import graph for ${incomplete === 1 ? "it" : "those"} is incomplete.`
-    );
-  }
-  if (coverage.importsExtracted === undefined) {
-    return (
-      " This repository was indexed before import extraction existed, so related files" +
-      " are not followed along imports. Re-attach it to rebuild the index."
-    );
-  }
-  return (
-    " Imports were not parsed for this repository, so related files are not followed" +
-    " along imports."
-  );
-}
-
-/** Human-facing name for the supported set. Kept beside describeCoverage, its only use. */
 const SYMBOL_LANGUAGE_LABEL = "JavaScript and TypeScript";
 
 /** True for paths inside vendored or generated trees. */

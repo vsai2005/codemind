@@ -10,6 +10,10 @@ import {
   type RepoRef,
 } from "@/lib/repo/github";
 import { readTarball } from "@/lib/repo/archive";
+import {
+  DERIVATION_VERSION,
+  isDerivationCurrent,
+} from "@/lib/repo/derivation-version";
 import { extractInternalSymbols, extractSymbols, supportsSymbols } from "@/lib/repo/symbols";
 import {
   scanImports,
@@ -106,12 +110,46 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
     where: {
       owner_name_commitSha: { owner: ref.owner, name: ref.name, commitSha: meta.commitSha },
     },
-    select: { id: true, status: true, fileCount: true, structure: true },
+    select: {
+      id: true,
+      status: true,
+      fileCount: true,
+      structure: true,
+      derivationVersion: true,
+    },
   });
+
+  /**
+   * Reuse requires BOTH an unchanged commit and an unchanged derivation version.
+   *
+   * The commit half was always here. The version half is what stops an improvement to
+   * an extractor leaving every already-ingested repository serving data the old code
+   * produced — measured, not hypothetical: a comment-masking fix removed 14 phantom
+   * edges from one repository, and nothing would ever have re-derived them.
+   *
+   * `null` is stale. A row written before this column existed cannot claim to be
+   * current, and treating unknown as current would disable the mechanism precisely on
+   * the rows that need it.
+   *
+   * Re-derivation costs the SAME three GitHub requests as a first ingestion — repo
+   * metadata, the tree, and one tarball — because nothing is fetched per file. That is
+   * why this is eager rather than lazy: there is no expensive path to defer.
+   */
+  const reusable =
+    existing?.status === "ready" && isDerivationCurrent(existing.derivationVersion);
+
+  if (existing?.status === "ready" && !reusable) {
+    logger.info("Re-deriving a repository indexed by an older extractor", {
+      owner: ref.owner,
+      name: ref.name,
+      storedVersion: existing.derivationVersion,
+      currentVersion: DERIVATION_VERSION,
+    });
+  }
 
   // Only a `ready` snapshot may be reused. Anything else was interrupted, and its rows
   // are a partial list that must not be mistaken for the repository.
-  if (existing?.status === "ready") {
+  if (reusable) {
     return {
       ok: true,
       repositoryId: existing.id,
@@ -430,6 +468,15 @@ export async function ingestRepository(ref: RepoRef): Promise<IngestResult> {
             primaryLanguage: language,
             symbolsExtracted,
             importsExtracted,
+            /**
+             * Stamped HERE, inside the transaction that writes the rows it describes.
+             *
+             * The ordering is the whole guarantee. A stamp written afterwards, in its
+             * own statement, would survive a run that failed between the two and leave
+             * a current version standing over partial data — which is worse than no
+             * stamp at all, because it would then be trusted and never re-derived.
+             */
+            derivationVersion: DERIVATION_VERSION,
             structure: structureWithCoverage as unknown as object,
           },
         });

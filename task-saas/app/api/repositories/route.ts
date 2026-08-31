@@ -7,6 +7,7 @@ import { enforceBodyLimit } from "@/lib/http/body-limit";
 import { parseRepoUrl } from "@/lib/repo/github";
 import { ingestRepository } from "@/lib/repo/ingest";
 import { describeCoverage } from "@/lib/repo/structure";
+import { DERIVATION_VERSION } from "@/lib/repo/derivation-version";
 
 /**
  * Attach a public GitHub repository to a project and index it.
@@ -100,8 +101,9 @@ export async function POST(req: Request): Promise<Response> {
      */
     const stored = await prisma.repository.findUnique({
       where: { id: result.repositoryId },
-      select: { structure: true },
+      select: { structure: true, derivationVersion: true },
     });
+    const storedVersion = stored?.derivationVersion ?? null;
     const storedStructure = stored?.structure as { entryPoints?: unknown } | null;
     const entryPointCount = Array.isArray(storedStructure?.entryPoints)
       ? storedStructure.entryPoints.length
@@ -129,7 +131,11 @@ export async function POST(req: Request): Promise<Response> {
       coverage: result.coverage ?? null,
       // The detected list lives in the same structure blob the coverage does, so the
       // note can report "no entry point" without ingestion storing a second copy.
-      coverageNote: describeCoverage(result.coverage, entryPointCount),
+      coverageNote: describeCoverage(result.coverage, {
+        entryPointCount,
+        derivationVersion: storedVersion,
+        currentDerivationVersion: DERIVATION_VERSION,
+      }),
     });
   } catch (error) {
     logger.error("Repository ingestion failed", {

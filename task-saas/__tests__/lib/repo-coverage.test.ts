@@ -44,6 +44,16 @@ function coverageFor(tree: typeof PYTHON_TREE, symbolsByPath: Map<string, string
     languages,
     languagesWithoutSymbols: languages.filter((l) => !supportsSymbols(l)),
     symbolsExtracted: symbolsByPath.size > 0,
+    /**
+     * Present so this fixture describes a MODERN index.
+     *
+     * Left off, `importsExtracted` is undefined, which coverageLimitations correctly
+     * reads as "indexed before import extraction existed" — a real limitation worth
+     * reporting, and one that made the fully-covered case stop being silent. The
+     * fixture was the thing out of date, not the assertion.
+     */
+    importsExtracted: symbolsByPath.size > 0,
+    filesWithIncompleteImportScan: 0,
   };
 }
 

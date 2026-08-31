@@ -398,6 +398,21 @@ model Repository {
   /// be read, and for a repository in a language whose imports are not parsed.
   importsExtracted Boolean @default(false)
 
+  /// Version of the derivation logic that produced this snapshot's data.
+  ///
+  /// Snapshot reuse is keyed on commit SHA, which is correct only while the extractors
+  /// are fixed. When one improves, an already-ingested repository keeps serving data
+  /// from the old one with nothing marking it stale. This column makes "same commit,
+  /// derived by older code" a distinguishable and actionable state.
+  ///
+  /// NULL means the row predates versioning and is treated as STALE, never as current.
+  /// That is the majority case on any existing database, and defaulting it to the
+  /// current version would make the mechanism a no-op exactly where it is needed.
+  ///
+  /// Written inside the same transaction as the derived rows, so a run that fails
+  /// partway cannot leave a current stamp standing over partial data.
+  derivationVersion Int?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
