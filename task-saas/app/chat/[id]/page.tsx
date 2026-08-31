@@ -62,18 +62,33 @@ export default function ChatPage() {
   const [modelId, setModelId] = useState<string | null>(null);
   const [stopped, setStopped] = useState(false);
   const [projectId, setProjectId] = useState<string | null>(null);
+  /**
+   * Set when the server says a reply to the last message is still being written.
+   *
+   * A generation outlives the reader: leaving a conversation detaches the stream
+   * instead of killing it, so the answer keeps being written and is persisted when it
+   * lands. What was missing is the other half — on coming back, this page fetched the
+   * history once, found no reply, and showed a conversation that looked dead. The work
+   * was never lost; it was invisible.
+   */
+  const [pendingSince, setPendingSince] = useState<string | null>(null);
+
+  const loadConversation = useCallback(async (): Promise<StoredMessage[] | null> => {
+    const res = await fetch(`/api/conversations/${params.id}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (typeof data?.projectId === "string") setProjectId(data.projectId);
+    setPendingSince(typeof data?.pendingSince === "string" ? data.pendingSince : null);
+    return Array.isArray(data?.messages) ? (data.messages as StoredMessage[]) : null;
+  }, [params.id]);
 
   useEffect(() => {
     let cancelled = false;
 
-    fetch(`/api/conversations/${params.id}`)
-      .then((res) => res.json())
-      .then((data) => {
+    void loadConversation()
+      .then((stored) => {
         if (cancelled) return;
-        if (typeof data?.projectId === "string") setProjectId(data.projectId);
-        if (Array.isArray(data?.messages)) {
-          setInitialMessages(data.messages.map(toMessage));
-        }
+        if (stored) setInitialMessages(stored.map(toMessage));
         setLoading(false);
       })
       .catch(() => {
@@ -83,7 +98,7 @@ export default function ChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [params.id]);
+  }, [loadConversation]);
 
   /**
    * The text of the turn currently in flight.
@@ -97,6 +112,7 @@ export default function ChatPage() {
 
   const {
     messages,
+    setMessages,
     input,
     setInput,
     handleInputChange,
@@ -119,6 +135,45 @@ export default function ChatPage() {
       if (lastAttemptRef.current) setInput(lastAttemptRef.current);
     },
   });
+
+  /**
+   * Watch for a reply being written by a generation this page is not streaming.
+   *
+   * Only runs when the server reported one pending AND useChat is not itself
+   * streaming — during a local turn the stream is the source of truth and polling
+   * beside it would race, showing a half-written reply twice.
+   *
+   * Polling rather than a socket because the reply arrives exactly once and the page
+   * only needs to notice within a few seconds; a persistent connection to learn a
+   * single fact would cost more than it saves. It stops the moment the reply lands or
+   * the server stops calling the turn pending, so an abandoned generation cannot leave
+   * the tab polling forever.
+   */
+  useEffect(() => {
+    if (!pendingSince || isLoading) return;
+
+    let cancelled = false;
+    const interval = setInterval(() => {
+      void loadConversation()
+        .then((stored) => {
+          if (cancelled || !stored) return;
+          const answered = stored[stored.length - 1]?.role === "assistant";
+          // Replace wholesale rather than appending: the reply may arrive with plan and
+          // artifact annotations attached, and toMessage is what rebuilds those into
+          // the same shape the live stream produces.
+          if (answered) setMessages(stored.map(toMessage));
+        })
+        .catch(() => {
+          // A failed poll is not a failed generation. Leave the indicator up and try
+          // again on the next tick rather than declaring the turn dead.
+        });
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [pendingSince, isLoading, loadConversation, setMessages]);
 
   // Progress parts accumulate across turns; clear them when a new turn starts.
   const submit = useCallback(
@@ -217,6 +272,16 @@ export default function ChatPage() {
               <ChatMessage key={m.id} message={m} />
             ))}
             {isLoading && <ThinkingIndicator data={data} />}
+            {!isLoading && pendingSince && (
+              // The reply is being written somewhere this page is not watching. Saying
+              // so is the whole point: the previous behaviour was indistinguishable
+              // from a turn that had silently failed.
+              <div className="ml-4 flex items-center gap-2 text-[13px] text-gray-500">
+                <span className="inline-flex h-2 w-2 shrink-0 animate-pulse rounded-full bg-accent-500" />
+                Still writing a reply you started earlier — it will appear here when it
+                finishes.
+              </div>
+            )}
             {!isLoading && stopped && (
               <p className="ml-4 text-[12px] font-medium text-gray-400">Generation stopped</p>
             )}

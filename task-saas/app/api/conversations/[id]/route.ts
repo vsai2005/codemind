@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db";
 import { NextResponse } from "next/server";
 import { logger } from "@/lib/logger";
 import { enforceBodyLimit } from "@/lib/http/body-limit";
+import { isGenerationPending } from "@/lib/ai/generation-window";
 
 /**
  * Conversation detail.
@@ -11,6 +12,13 @@ import { enforceBodyLimit } from "@/lib/http/body-limit";
  * Artifacts are returned as metadata only. The `payload` column holds full file
  * contents and is deliberately excluded from the select so it can never reach the
  * browser.
+ *
+ * `pendingSince` tells the client a reply is still being written. It matters because a
+ * generation SURVIVES the reader leaving — switching conversations detaches the stream
+ * rather than killing it (see lib/ai/stream-lifecycle.ts) — so coming back to a
+ * conversation mid-answer must not look like nothing is happening. Without this the
+ * page loads the history once, finds no reply, and shows a dead conversation until the
+ * user reloads by hand.
  */
 
 export async function GET(
@@ -47,7 +55,16 @@ export async function GET(
       return NextResponse.json({ error: "Not Found" }, { status: 404 });
     }
 
-    return NextResponse.json(conversation);
+    // Derived, not stored: the user's message is written before generation begins, so
+    // a trailing user turn IS the in-flight state. See generation-window.ts for why
+    // this is bounded rather than open-ended.
+    const last = conversation.messages[conversation.messages.length - 1] ?? null;
+    const pending = isGenerationPending(last?.role ?? null, last?.createdAt ?? null);
+
+    return NextResponse.json({
+      ...conversation,
+      pendingSince: pending ? last!.createdAt.toISOString() : null,
+    });
   } catch (error) {
     logger.error("Failed to fetch conversation", {
       error: error instanceof Error ? error.message : "unknown",

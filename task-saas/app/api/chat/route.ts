@@ -26,6 +26,7 @@ import { createArtifactStreamResponse } from "@/lib/artifacts/stream";
 import { buildArtifactBytes } from "@/lib/artifacts/build";
 import { enforceRateLimit, acquireGenerationSlot, concurrentGenerationLimit } from "@/lib/rate-limit";
 import { scrubForLog } from "@/lib/ai/failure-classification";
+import { GENERATION_SLOT_MAX_LIFETIME_MS } from "@/lib/ai/generation-window";
 import { releaseOnStreamEnd } from "@/lib/ai/stream-lifecycle";
 import { buildPlan, planToPromptBlock, type ChatPlan } from "@/lib/ai/planning";
 import { createDataStreamPrefix } from "@/lib/ai/plan-stream";
@@ -156,7 +157,7 @@ const TURN_KEY_ASSUMED_LIVE_MS = 2 * 60_000;
  * generation that is still streaming would cut off a reply the user is reading. Five
  * minutes is far past anything real and still bounds the leak.
  */
-const GENERATION_SLOT_MAX_LIFETIME_MS = 5 * 60_000;
+/** The value itself lives in lib/ai/generation-window.ts — see there for why. */
 
 /**
  * How many indexed files are ranked for one question.
