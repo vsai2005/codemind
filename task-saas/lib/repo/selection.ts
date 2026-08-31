@@ -101,6 +101,21 @@ const MIN_FILES_FOR_UBIQUITY_FILTER = 25;
 /** Files nearer the root are usually more architecturally significant. */
 const DEPTH_PENALTY = 0.5;
 
+/**
+ * How many top-scoring files are expanded along import edges.
+ *
+ * Small on purpose. Expansion is a bet that the question's answer sits NEXT TO its
+ * best keyword match, and that bet is only good where the match itself is strong —
+ * expanding the tenth-best match spends budget on a guess about a guess.
+ */
+const EDGE_SEED_LIMIT = 4;
+
+/** Neighbours taken from any one seed, so a hub file cannot fill the whole list. */
+const EDGE_NEIGHBOURS_PER_SEED = 3;
+
+/** Neighbours added in total, whatever the shape of the graph. */
+const EDGE_NEIGHBOURS_TOTAL = 8;
+
 export interface IndexedFile {
   path: string;
   size: number;
@@ -288,7 +303,21 @@ export function scoreFiles(files: readonly IndexedFile[], question: string): Sco
 export function fallbackFiles(
   files: readonly IndexedFile[],
   entryPoints: readonly string[],
-  maxFiles: number
+  maxFiles: number,
+  /**
+   * Resolved import edges, when a graph exists for this snapshot.
+   *
+   * THIS IS WHERE EDGES EARN THEIR KEEP. The depth-ordered sweep below is an admitted
+   * guess — "shallow and large" is a proxy for importance, chosen because nothing
+   * better was available. A file the entry point actually imports is not a proxy: it is
+   * the code the entry point runs, which is exactly how a person reads an unfamiliar
+   * repository. So neighbours of the entry points rank ABOVE that sweep and below the
+   * entry points themselves.
+   *
+   * Nothing here outranks a file that matched the question, because this function only
+   * runs when NO file matched the question.
+   */
+  edges: readonly FileEdgeLink[] = []
 ): ScoredFile[] {
   // Filtered once, up front, so neither the entry-point pass nor the depth-ordered
   // sweep below can reach an unrecognised file. Entry points are not language-checked
@@ -305,6 +334,15 @@ export function fallbackFiles(
     if (chosen.length >= maxFiles) return chosen;
   }
 
+  // One hop out from the entry points, before falling back to depth ordering.
+  if (edges.length > 0 && chosen.length > 0) {
+    const seeds = chosen.map((c) => c.path);
+    for (const file of neighboursOf(seeds, candidates, edges, new Set(seeds))) {
+      if (chosen.length >= maxFiles) return chosen;
+      chosen.push({ ...file, score: 0 });
+    }
+  }
+
   const remaining = candidates
     .filter((f) => !chosen.some((c) => c.path === f.path))
     .sort((a, b) => {
@@ -318,6 +356,135 @@ export function fallbackFiles(
   }
 
   return chosen;
+}
+
+/** One resolved import edge, reduced to the two paths it connects. */
+export interface FileEdgeLink {
+  /** The importing file. */
+  fromPath: string;
+  /** The imported file. Only resolved edges appear here — see FileEdge in the schema. */
+  toPath: string;
+}
+
+/**
+ * Files one import hop from `seeds`, in a deterministic, bounded order.
+ *
+ * BOTH DIRECTIONS, DEPENDENCIES FIRST. What a seed imports usually explains how it
+ * works; what imports the seed shows how it is used. The first answers more questions,
+ * so it is ordered first and wins the budget when only some neighbours fit.
+ *
+ * Bounded per seed and in total because a hub module in a real repository has hundreds
+ * of importers, and an unbounded expansion would quietly turn "read the relevant files"
+ * into "read the repository".
+ *
+ * Sorted rather than left in edge order so the same repository and question always
+ * produce the same list. A selection that varied between identical turns would make a
+ * wrong answer impossible to reproduce.
+ */
+function neighboursOf(
+  seeds: readonly string[],
+  files: readonly IndexedFile[],
+  edges: readonly FileEdgeLink[],
+  /**
+   * Paths already selected, which callers MUST include the seeds in — both do.
+   *
+   * That requirement is what makes a self-import a non-event here: the seed is
+   * excluded, so an edge from a file to itself can never add it a second time. A
+   * dedicated self-edge guard was written and then deleted, because mutation
+   * testing showed removing it changed no result — the exclusion had been doing the
+   * work. Stated rather than re-derived, since a future caller passing an exclude
+   * set without its seeds would silently reintroduce the duplicate.
+   */
+  exclude: ReadonlySet<string>
+): IndexedFile[] {
+  const byPath = new Map(files.filter(isSelectableSource).map((f) => [f.path, f]));
+
+  // Adjacency built once. Rebuilding it per seed would be quadratic on the edge list.
+  const imports = new Map<string, string[]>();
+  const importedBy = new Map<string, string[]>();
+  for (const edge of edges) {
+    (imports.get(edge.fromPath) ?? imports.set(edge.fromPath, []).get(edge.fromPath)!).push(
+      edge.toPath
+    );
+    (
+      importedBy.get(edge.toPath) ?? importedBy.set(edge.toPath, []).get(edge.toPath)!
+    ).push(edge.fromPath);
+  }
+
+  const out: IndexedFile[] = [];
+  const taken = new Set<string>();
+
+  for (const seed of seeds.slice(0, EDGE_SEED_LIMIT)) {
+    if (out.length >= EDGE_NEIGHBOURS_TOTAL) break;
+
+    const candidates = [
+      ...(imports.get(seed) ?? []).slice().sort(),
+      ...(importedBy.get(seed) ?? []).slice().sort(),
+    ];
+
+    let fromThisSeed = 0;
+    for (const path of candidates) {
+      if (fromThisSeed >= EDGE_NEIGHBOURS_PER_SEED) break;
+      if (out.length >= EDGE_NEIGHBOURS_TOTAL) break;
+      if (exclude.has(path) || taken.has(path)) continue;
+
+      const file = byPath.get(path);
+      // Absent when the edge points at a file the caller did not load — one outside the
+      // scan limit, or without a recognised source extension. Skipped rather than
+      // fetched: this module may only choose among files it was given.
+      if (!file) continue;
+
+      taken.add(path);
+      fromThisSeed++;
+      out.push(file);
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Add each strong match's import neighbours as a SECOND TIER beneath it.
+ *
+ * WHAT THIS FIXES
+ * Scoring matches a question's words against paths and symbol names. A file can be the
+ * right answer and share no words with the question. Symbols closed part of that gap;
+ * edges close a different part: when scoring DOES find the right area, the code that
+ * explains it is often one import away, in a file the question never names.
+ *
+ * WHY NEIGHBOURS ARE APPENDED RATHER THAN SCORED
+ * They are concatenated after every directly-scored file instead of being given a score
+ * and re-sorted. That makes "a neighbour never displaces a file that matched the
+ * question" a structural property rather than an arithmetic one — no weight to tune, and
+ * no way for a later change to the scale to let a guess outrank a match.
+ *
+ * CONSEQUENCE, and it is worth stating rather than discovering: with a small per-turn
+ * file cap, this fires only when scoring returned fewer files than the cap. That is the
+ * conservative half of the wiring on purpose. The half that actually changes most turns
+ * is in `fallbackFiles`, where the ordering being displaced is an admitted guess.
+ *
+ * Returns `scored` unchanged when there are no edges, which is what a repository indexed
+ * before edges existed produces. Degrading to the previous behaviour is the correct
+ * response to an absent graph; inventing neighbours from path proximity would not be.
+ */
+export function expandAlongEdges(
+  scored: readonly ScoredFile[],
+  files: readonly IndexedFile[],
+  edges: readonly FileEdgeLink[]
+): ScoredFile[] {
+  if (scored.length === 0 || edges.length === 0) return [...scored];
+
+  const chosen = new Set(scored.map((f) => f.path));
+  const neighbours = neighboursOf(
+    scored.map((f) => f.path),
+    files,
+    edges,
+    chosen
+  );
+
+  // Score 0 marks "not matched, included by adjacency". The ordering that matters is
+  // positional, and nothing downstream re-sorts.
+  return [...scored, ...neighbours.map((file) => ({ ...file, score: 0 }))];
 }
 
 /**

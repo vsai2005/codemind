@@ -42,7 +42,12 @@ import {
   SUMMARY_MAX_OUTPUT_TOKENS,
 } from "@/lib/ai/summarization";
 import { fetchFileContent } from "@/lib/repo/github";
-import { fallbackFiles, scoreFiles, selectWithinBudget } from "@/lib/repo/selection";
+import {
+  expandAlongEdges,
+  fallbackFiles,
+  scoreFiles,
+  selectWithinBudget,
+} from "@/lib/repo/selection";
 import { createHash } from "node:crypto";
 
 /**
@@ -187,6 +192,19 @@ const REPOSITORY_FETCH_ALLOWANCE_RATIO = 0.3;
  * thin — and the first thing to suspect when the budget disappears.
  */
 const MAX_REPOSITORY_FILES_PER_TURN = 3;
+
+/**
+ * How many files are expanded along the import graph, and the ceiling on rows read to
+ * do it.
+ *
+ * The seed count is small because expansion bets that the answer sits next to the best
+ * match, and that bet is only good where the match is strong. The scan limit is a
+ * backstop, not an expected size: the query is two index lookups against a handful of
+ * seed ids, so reaching it would mean a seed with thousands of importers — in which
+ * case truncating is the right outcome, since `neighboursOf` would discard them anyway.
+ */
+const REPOSITORY_EDGE_SEEDS = 4;
+const REPOSITORY_EDGE_SCAN_LIMIT = 2000;
 
 /**
  * How much of the user's question is echoed into the empty-selection warning.
@@ -607,6 +625,13 @@ export async function POST(req: Request): Promise<Response> {
       name: string;
       commitSha: string;
       entryPoints: string[];
+      /**
+       * Whether an import graph exists for this snapshot. Carried rather than inferred
+       * from an empty edge query, because "no edges" and "never parsed" would otherwise
+       * be the same observation — the distinction Repository.importsExtracted exists
+       * for, and the reason a Python repo must not look like a repo with no imports.
+       */
+      importsExtracted: boolean;
     } | null = null;
 
     if (activeProjectId) {
@@ -626,6 +651,7 @@ export async function POST(req: Request): Promise<Response> {
               status: true,
               // Detected at ingestion, used when path scoring finds nothing.
               structure: true,
+              importsExtracted: true,
             },
           },
         },
@@ -652,6 +678,7 @@ export async function POST(req: Request): Promise<Response> {
             name: project.repository.name,
             commitSha: project.repository.commitSha,
             entryPoints,
+            importsExtracted: project.repository.importsExtracted,
           };
         }
         projectInstructions = project.instructions;
@@ -1365,6 +1392,7 @@ async function loadRepositoryFiles(params: {
     name: string;
     commitSha: string;
     entryPoints: string[];
+    importsExtracted: boolean;
   };
   question: string;
   contextTokens: number;
@@ -1384,7 +1412,16 @@ async function loadRepositoryFiles(params: {
       // a value is a plain object" — reach the file that implements it. Omitting it
       // here would silently leave scoring path-only in production while every unit
       // test still passed, because the tests supply symbols directly.
-      select: { path: true, size: true, language: true, symbols: true, internalSymbols: true },
+      // `id` is here only to translate edge endpoints back into paths below. Selection
+      // itself stays path-based: it must remain testable without a database.
+      select: {
+        id: true,
+        path: true,
+        size: true,
+        language: true,
+        symbols: true,
+        internalSymbols: true,
+      },
       take: REPOSITORY_SELECTION_SCAN_LIMIT,
     });
 
@@ -1430,10 +1467,83 @@ async function loadRepositoryFiles(params: {
      * symbol index exists.
      */
     const scored = scoreFiles(indexed, question);
+
+    /**
+     * Resolved import edges for the files expansion will start from.
+     *
+     * Queried after scoring and only for the seeds, not loaded wholesale: FileEdge is
+     * indexed on (repositoryId, sourceFileId) and (repositoryId, targetFileId) so this
+     * is two index lookups against a handful of ids rather than a scan of every edge.
+     *
+     * Skipped entirely when no graph exists — a snapshot indexed before edges, or a
+     * language whose imports are not parsed. That is `importsExtracted`, carried from
+     * the repository row rather than inferred from an empty result, because "no edges"
+     * and "never parsed" are different facts and only one of them is worth a query.
+     *
+     * The seeds differ by path, and so does what the edges are FOR:
+     *   - scoring matched  -> the top matches, widened to the code they sit next to;
+     *   - scoring matched nothing -> the entry points, whose imports beat the
+     *     depth-ordered guess that fallbackFiles would otherwise fall through to.
+     */
+    let links: Array<{ fromPath: string; toPath: string }> = [];
+
+    if (repository.importsExtracted) {
+      const idByPath = new Map(indexed.map((f) => [f.path, f.id]));
+      const pathById = new Map(indexed.map((f) => [f.id, f.path]));
+
+      const seedPaths =
+        scored.length > 0
+          ? scored.slice(0, REPOSITORY_EDGE_SEEDS).map((f) => f.path)
+          : repository.entryPoints.slice(0, REPOSITORY_EDGE_SEEDS);
+
+      const seedIds = seedPaths
+        .map((path) => idByPath.get(path))
+        .filter((id): id is string => typeof id === "string");
+
+      if (seedIds.length > 0) {
+        const edgeRows = await prisma.fileEdge.findMany({
+          where: {
+            repositoryId: repository.id,
+            kind: "resolved",
+            OR: [{ sourceFileId: { in: seedIds } }, { targetFileId: { in: seedIds } }],
+          },
+          select: { sourceFileId: true, targetFileId: true },
+          take: REPOSITORY_EDGE_SCAN_LIMIT,
+        });
+
+        links = edgeRows.flatMap((row) => {
+          const fromPath = pathById.get(row.sourceFileId);
+          const toPath = row.targetFileId ? pathById.get(row.targetFileId) : undefined;
+          // An endpoint outside the loaded set — past the scan limit, or a file with no
+          // recognised source extension. Dropped, because expansion may only reach files
+          // that were candidates in the first place.
+          if (!fromPath || !toPath) return [];
+          return [{ fromPath, toPath }];
+        });
+      }
+    }
+
+    /**
+     * A question about behaviour rather than filenames scores nothing — the ceiling of
+     * path-only selection, measured rather than assumed. See fallbackFiles for the
+     * case that demonstrates it and why entry points are the honest answer until a
+     * symbol index exists.
+     */
     const candidates =
       scored.length > 0
-        ? scored
-        : fallbackFiles(indexed, repository.entryPoints, MAX_REPOSITORY_FILES_PER_TURN);
+        ? expandAlongEdges(scored, indexed, links)
+        : fallbackFiles(indexed, repository.entryPoints, MAX_REPOSITORY_FILES_PER_TURN, links);
+
+    /**
+     * How many of the candidates came from the graph rather than from matching.
+     *
+     * Reported because the expansion is otherwise completely invisible: it changes which
+     * files the model sees and leaves no trace in the answer. Without this the only way
+     * to know whether edges ever fire in production would be to reason about the code,
+     * which is how a feature quietly does nothing for months.
+     */
+    const fromGraph = scored.length > 0 ? candidates.length - scored.length : 0;
+
     // Currently unreachable, and deliberately checked anyway: fallbackFiles(indexed, ...)
     // cannot return empty while `indexed` is non-empty — with no entry points matched it
     // falls through to "remaining files by depth", which is `indexed` itself. Verified,
@@ -1480,6 +1590,12 @@ async function loadRepositoryFiles(params: {
       candidates: indexed.length,
       scored: scored.length,
       usedFallback: scored.length === 0,
+      // Edge coverage, so a turn that got no graph help is distinguishable from a
+      // repository that has no graph at all.
+      importsExtracted: repository.importsExtracted,
+      edgesConsidered: links.length,
+      addedByGraph: fromGraph,
+      chosenFromGraph: chosen.filter((c) => c.score === 0 && scored.length > 0).length,
       fetched: files.length,
     });
 
