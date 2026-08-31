@@ -58,6 +58,16 @@ const DEEPSEEK_MAX_OUTPUT_TOKENS = 16_384;
  * as the visible reply. Same argument as DeepSeek above: an 8k ceiling risks the answer
  * being truncated by the model's own thinking. NVIDIA's own sample for this model uses
  * 16,384, which is also where AI_MAX_OUTPUT_TOKENS sits, so nothing here is speculative.
+ *
+ * The question left UNANSWERED for DeepSeek — whether reported completionTokens count
+ * the reasoning pass or only the visible reply — IS answered here, because unlike
+ * DeepSeek this model reports usage while streaming. Measured 2026-08-31: a prompt whose
+ * visible reply was the five characters "$0.05" streamed 123 characters of
+ * reasoning_content and reported completion_tokens: 69. Reasoning is counted.
+ *
+ * That is worth knowing when reading the usage figures in the header or /settings: a
+ * Kimi turn's completion count reflects thinking the user never sees, so a one-word
+ * answer can legitimately cost dozens of tokens. It is not a bug in the accounting.
  */
 const KIMI_K3_MAX_OUTPUT_TOKENS = 16_384;
 
