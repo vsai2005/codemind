@@ -52,22 +52,6 @@ const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
  */
 const DEEPSEEK_MAX_OUTPUT_TOKENS = 16_384;
 
-/**
- * Ox Alpha reasons on EVERY request — OpenRouter reports `reasoning.mandatory: true`
- * with a default effort of "max", so unlike DeepSeek there is no non-reasoning path to
- * fall back to. Those thinking tokens are billed against the same output budget as the
- * visible reply, so the ceiling is set well above the 8k default to keep an answer from
- * being truncated by its own reasoning pass.
- *
- * The provider itself allows 131,072. This is deliberately lower: `resolveModel` takes
- * the min of this and AI_MAX_OUTPUT_TOKENS (16,384 by default), so the runtime budget
- * is what actually binds today. Stating the model's full headroom here would only
- * matter if an operator raised that budget, and 131k of output is a cost and latency
- * decision that should be made deliberately rather than inherited from a provider's
- * maximum.
- */
-const OX_ALPHA_MAX_OUTPUT_TOKENS = 32_768;
-
 /** Fallback when NVIDIA_VISION_MODEL is unset. Mirrors lib/ai/gateway.ts. */
 const DEFAULT_NVIDIA_VISION_MODEL = "meta/llama-3.2-90b-vision-instruct";
 
@@ -133,27 +117,6 @@ function buildRegistry(): ModelDescriptor[] {
       // 2026-08-24 while Nemotron on the same NVIDIA host stayed responsive). Listed
       // so users know it's coming, but not selectable until that's resolved.
       comingSoon: true,
-    },
-    {
-      id: "ox-alpha",
-      displayName: process.env.OPENROUTER_DISPLAY_NAME || "Ox Alpha",
-      provider: "openrouter",
-      providerLabel: "OpenRouter",
-      // A STEALTH model: the `stealth/` namespace is how OpenRouter ships an unbranded
-      // preview, and such ids are withdrawn without notice when the model graduates or
-      // is pulled. Env-overridable so an operator can repoint it the day that happens
-      // without waiting on a deploy.
-      providerModelId: process.env.OPENROUTER_MODEL || "stealth/ox-alpha",
-      // OpenRouter reports 1,048,576 — the same window the other frontier entries use.
-      providerContextTokens: FRONTIER_CONTEXT_TOKENS,
-      maxOutputTokens: OX_ALPHA_MAX_OUTPUT_TOKENS,
-      supportsStreaming: true,
-      // OpenRouter lists input_modalities ["text","image","video"]. Only the image half
-      // is reachable from CodeMind: /api/upload accepts images as data URLs and rejects
-      // video outright, so vision here means images, as it does for Gemini.
-      supportsVision: true,
-      strengths: ["Long Context", "Coding", "Reasoning"],
-      enabled: true,
     },
   ];
 }

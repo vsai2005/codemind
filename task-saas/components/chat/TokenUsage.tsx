@@ -13,8 +13,8 @@ import { useCallback, useEffect, useState } from "react";
  *
  * Not every turn has one. Usage arrives on the streaming path only when the request
  * set `stream_options.include_usage`, which @ai-sdk/openai sends under
- * `compatibility: "strict"` — NVIDIA and (measured) OpenRouter report, Gemini does
- * not. Unreported turns are COUNTED and shown separately rather than estimated into
+ * `compatibility: "strict"` — NVIDIA reports, Gemini does not. Unreported turns are
+ * COUNTED and shown separately rather than estimated into
  * the total, so the number stays checkable against the provider's own accounting.
  */
 

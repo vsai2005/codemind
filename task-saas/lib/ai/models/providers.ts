@@ -10,10 +10,10 @@ import type { ProviderAdapter, ProviderId } from "./types";
  * live AI SDK model.
  *
  * WHY EVERY ADAPTER USES `createOpenAI`
- * All four providers expose an OpenAI-compatible HTTP surface (NVIDIA's integrate API,
+ * All three providers expose an OpenAI-compatible HTTP surface (NVIDIA's integrate API,
  * Google's `/v1beta/openai` compatibility endpoint, DeepSeek via that same NVIDIA
- * host on a separate credential, and OpenRouter's `/api/v1`). Routing
- * them through one client shape keeps a single request/response code path — and, just as
+ * host on a separate credential). Routing them through one client shape keeps a single
+ * request/response code path — and, just as
  * importantly, takes zero additional npm dependencies. No provider-specific SDK is
  * installed or needed.
  *
@@ -49,9 +49,6 @@ const DEFAULT_GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com/v1bet
  * vice versa), turning a routine failover into a 404. Same host, different account.
  */
 const DEFAULT_DEEPSEEK_BASE_URL = "https://integrate.api.nvidia.com/v1";
-
-/** OpenRouter's OpenAI-compatible endpoint. Overridable for proxies. */
-const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
 /** An `@ai-sdk/openai` provider instance: call it with a model id to get a model. */
 type OpenAICompatibleProvider = ReturnType<typeof createOpenAI>;
@@ -179,54 +176,6 @@ const deepseekAdapter: ProviderAdapter = {
   },
 };
 
-// ---------------------------------------------------------------------------
-// OpenRouter — a broker, not a first-party model host
-// ---------------------------------------------------------------------------
-
-let openrouterClient: OpenAICompatibleProvider | null = null;
-
-const openrouterAdapter: ProviderAdapter = {
-  id: "openrouter",
-  hasOwnFailover: false,
-  isConfigured(): boolean {
-    return readEnv("OPENROUTER_API_KEY") !== null;
-  },
-  createModel(providerModelId: string): LanguageModelV1 {
-    const apiKey = readEnv("OPENROUTER_API_KEY");
-    if (!apiKey) throw missingCredentialError("OPENROUTER_API_KEY");
-
-    if (!openrouterClient) {
-      openrouterClient = createOpenAI({
-        baseURL: readEnv("OPENROUTER_BASE_URL") ?? DEFAULT_OPENROUTER_BASE_URL,
-        apiKey,
-        /**
-         * "compatible" for the same reason Google and DeepSeek are: it is the setting
-         * that has actually been exercised, not the one that looks best on paper.
-         * Under "strict" the SDK adds `stream_options: { include_usage: true }`, which
-         * would give this model real token accounting instead of null — OpenRouter
-         * documents support for it, but documented support is not a measurement, and
-         * the DeepSeek comment above is a standing example of why that distinction
-         * earns its keep here. Flip only after a probe returns finite usage.
-         */
-        compatibility: "compatible",
-        /**
-         * OpenRouter attributes traffic by these headers and surfaces the app on its
-         * leaderboards. Both are optional; sending them keeps this deployment's usage
-         * identifiable in the dashboard rather than anonymous.
-         */
-        headers: {
-          "HTTP-Referer": readEnv("OPENROUTER_SITE_URL") ?? "https://github.com/vsai2005/codemind",
-          "X-Title": "CodeMind",
-        },
-        // Fail fast if the endpoint accepts the connection but never answers.
-        fetch: (input, init) => fetchWithHeaderTimeout(input, init),
-      });
-    }
-
-    return openrouterClient(providerModelId);
-  },
-};
-
 /**
  * Adapter table. Exhaustive over ProviderId, so adding a provider to that union is a
  * compile error until an adapter exists for it.
@@ -235,7 +184,6 @@ const ADAPTERS: Readonly<Record<ProviderId, ProviderAdapter>> = {
   nvidia: nvidiaAdapter,
   google: googleAdapter,
   deepseek: deepseekAdapter,
-  openrouter: openrouterAdapter,
 };
 
 /**
@@ -252,9 +200,10 @@ const SDK_RETRIES_WITHOUT_FAILOVER = 2;
  *
  * Zero wherever the provider already retries for itself, so the two cannot multiply.
  * Non-zero everywhere else, because otherwise nothing in the stack retries at all: a
- * single transient 429 from a shared upstream pool ends the user's turn. Ox Alpha made
- * that concrete — it is free and stealth, so `upstream_provider_shared_pool` 429s
- * arrive in bursts between perfectly successful calls.
+ * single transient 429 from a shared upstream pool ends the user's turn. Shared pools
+ * make that concrete: 429s arrive in bursts between perfectly successful calls, so the
+ * difference between zero retries and two is the difference between a dead turn and a
+ * slightly slower one.
  */
 export function sdkRetriesFor(id: ProviderId): number {
   return ADAPTERS[id].hasOwnFailover ? 0 : SDK_RETRIES_WITHOUT_FAILOVER;

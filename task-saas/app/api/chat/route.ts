@@ -73,9 +73,9 @@ function isProviderContextError(error: unknown): boolean {
  * It used to be a flat 0, on the reasoning that "the gateway already performs bounded
  * failover across API keys". That is true and still holds for NVIDIA: leaving the SDK
  * at its default of 2 would multiply against the gateway and fire up to nine upstream
- * calls for one turn. But the gateway only wraps NVIDIA. Google, DeepSeek and
- * OpenRouter are plain single-credential clients with nothing behind them, so a flat 0
- * meant nothing in the stack retried at all and one transient 429 ended the turn.
+ * calls for one turn. But the gateway only wraps NVIDIA. Google and DeepSeek are plain
+ * single-credential clients with nothing behind them, so a flat 0 meant nothing in the
+ * stack retried at all and one transient 429 ended the turn.
  */
 
 /**
