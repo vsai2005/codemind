@@ -19,8 +19,6 @@ import { useCallback, useEffect, useState } from "react";
  */
 
 interface ConversationUsage {
-  promptTokens: number;
-  completionTokens: number;
   totalTokens: number;
   unreportedMessages: number;
 }
@@ -31,8 +29,6 @@ function parseUsage(body: unknown): ConversationUsage | null {
   if (typeof raw.totalTokens !== "number") return null;
 
   return {
-    promptTokens: typeof raw.promptTokens === "number" ? raw.promptTokens : 0,
-    completionTokens: typeof raw.completionTokens === "number" ? raw.completionTokens : 0,
     totalTokens: raw.totalTokens,
     unreportedMessages:
       typeof raw.unreportedMessages === "number" ? raw.unreportedMessages : 0,
@@ -81,9 +77,11 @@ export function TokenUsage({
   // counts at all. An empty readout is better than a confident "0 tokens".
   if (!usage || (usage.totalTokens === 0 && usage.unreportedMessages === 0)) return null;
 
+  // Says CONVERSATION TOTAL explicitly. Without it the figure reads as the cost of the
+  // last message, which is what made a 530 beside a two-word reply look wrong — it is
+  // cumulative, and every turn resends the system prompt and the history so far.
   const title =
-    `${usage.promptTokens.toLocaleString("en-US")} prompt + ` +
-    `${usage.completionTokens.toLocaleString("en-US")} completion` +
+    `${usage.totalTokens.toLocaleString("en-US")} tokens used in this conversation so far` +
     (usage.unreportedMessages > 0
       ? ` · ${usage.unreportedMessages} turn${usage.unreportedMessages === 1 ? "" : "s"} not reported by the provider`
       : "");

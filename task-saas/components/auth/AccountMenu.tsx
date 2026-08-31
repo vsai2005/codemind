@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { AccountUsage } from "@/components/auth/AccountUsage";
 import { signOut, useSession } from "next-auth/react";
@@ -73,6 +74,20 @@ export function AccountMenu(): React.ReactElement {
             per call, but it is not free per navigation.
           */}
           <AccountUsage />
+
+          {/*
+            The usage block above already links here — this row is for the reader who
+            came looking for settings rather than for a number, and would not think to
+            click a statistic to find them.
+          */}
+          <Link
+            href="/settings"
+            role="menuitem"
+            className="block border-b border-gray-100 px-3 py-2.5 text-[13px] font-medium text-gray-700 transition-colors hover:bg-gray-50 focus:outline-none focus-visible:bg-gray-50"
+          >
+            Settings
+          </Link>
+
           <button
             type="button"
             role="menuitem"
