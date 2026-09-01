@@ -61,11 +61,13 @@ ${COMMON_RULES}`;
 Reply with EXACTLY this structure:
 
 <codemind_summary>One plain sentence telling the user what you created.</codemind_summary>
-<codemind_artifact type="file" name="middleware.ts">
+<codemind_artifact type="file" name="descriptive-name.ext">
 complete file content
 </codemind_artifact>
 
 - Use the exact filename the user asked for when they named one.
+- When they did not name one, DERIVE the filename from what the file contains: a debounce helper is "debounce.ts", a CSV parser is "csv-parser.js". Use the extension of the language you wrote.
+- "descriptive-name.ext" above is a placeholder showing the attribute's shape. Never emit it, and never reuse a filename from these instructions.
 - The artifact body is the raw file content, with no <file> tags around it.
 
 ${COMMON_RULES}`;
