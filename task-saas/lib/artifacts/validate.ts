@@ -75,6 +75,25 @@ const CONTINUATION_RE =
 const DANGLING_RE = /(?:[=+\-*/%&|^,:<([{]|=>|&&|\|\||\?\.|\bconst\b|\blet\b|\breturn\b)$/;
 
 /**
+ * Endings that LOOK dangling to the rule above but legally terminate a file.
+ *
+ * A closing block-comment marker is the whole list, and it is not a corner case:
+ * the character class in DANGLING_RE contains both the star and the slash, so every
+ * file whose last line closes a block comment matched it.
+ *
+ * MEASURED, not hypothetical. Three of three single-file artifacts that reached
+ * validation in a 42-generation run were rejected this way, each a complete file
+ * ending in a trailing JSDoc or a commented-out usage example. A valid artifact
+ * refused outright is worse than one that slips through, so the exclusion is checked
+ * alongside the dangling rule rather than left to a caller.
+ *
+ * NOT widened beyond this. A file truncated part-way through a block comment does
+ * not end in that marker at all, because the comment is left unterminated, so this
+ * cannot hide that case. It was already invisible to this rule and remains so.
+ */
+const LEGAL_TRAILING_RE = /\*\/$/;
+
+/**
  * Remove string literals and comments so brace counting is not thrown off by
  * braces that appear inside strings or comments.
  */
@@ -149,7 +168,7 @@ export function findTruncation(filePath: string, content: string): string | null
   if (fences % 2 !== 0) return `"${filePath}" has an unclosed code fence`;
 
   if (CODE_EXTENSIONS.test(filePath)) {
-    if (DANGLING_RE.test(lastLine)) {
+    if (DANGLING_RE.test(lastLine) && !LEGAL_TRAILING_RE.test(lastLine)) {
       return `"${filePath}" ends mid-statement ("${lastLine.slice(0, 40)}")`;
     }
 
