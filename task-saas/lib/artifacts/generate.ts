@@ -5,6 +5,7 @@ import { validateArtifact } from "./validate";
 import { verifyArtifact, type ArtifactStage, type VerificationReport } from "./verify";
 import { scrubForLog } from "@/lib/ai/failure-classification";
 import { getArtifactOutputTokenLimit } from "@/lib/env";
+import { HEADER_TIMEOUT_HEADER } from "@/lib/ai/fetch-timeout";
 import { ARTIFACT_LIMITS, type ArtifactType, type NormalizedArtifact } from "./types";
 
 /**
@@ -147,6 +148,19 @@ export interface GenerateArtifactOptions {
    */
   contextPrompt?: string;
   signal?: AbortSignal;
+  /**
+   * Header-phase budget for a model measured to be slow to first byte, in ms.
+   *
+   * The streaming chat path already sends this, but the artifact path returned before
+   * reaching that code and generateText was called with the 60s default. Kimi K3 takes
+   * ~175s to its first byte, so artifact generation with it could never succeed —
+   * failing identically whether the provider was healthy or not. Chat worked; downloads
+   * could not.
+   *
+   * Optional because most models do not need it, and absent means "use the deployment
+   * default" rather than "no timeout".
+   */
+  headerTimeoutMs?: number;
 }
 
 /**
@@ -177,7 +191,7 @@ function defaultSummary(artifact: NormalizedArtifact): string {
 export async function generateArtifact(
   options: GenerateArtifactOptions
 ): Promise<ArtifactGeneration> {
-  const { type, userPrompt, contextPrompt, signal } = options;
+  const { type, userPrompt, contextPrompt, signal, headerTimeoutMs } = options;
 
   const system = contextPrompt
     ? `${instructionsFor(type)}\n\n--- CONVERSATION CONTEXT ---\n${contextPrompt}`
@@ -201,6 +215,12 @@ export async function generateArtifact(
       // against it and re-run an expensive generation several times over.
       maxRetries: 0,
       abortSignal: signal,
+      // Consumed and stripped by fetch-timeout.ts, so no provider ever sees it. Spread
+      // conditionally: sending the header with no value would be read as a malformed
+      // override rather than as an absent one.
+      ...(headerTimeoutMs
+        ? { headers: { [HEADER_TIMEOUT_HEADER]: String(headerTimeoutMs) } }
+        : {}),
     });
     output = result.text;
     finishReason = result.finishReason;

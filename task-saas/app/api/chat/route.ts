@@ -800,6 +800,9 @@ export async function POST(req: Request): Promise<Response> {
         model: resolved.model,
         provider: resolved.descriptor.provider,
         providerModelId: resolved.descriptor.providerModelId,
+        // This dispatch returns before the streaming path's header-timeout block, so
+        // the budget has to travel with the request rather than being applied there.
+        headerTimeoutMs: resolved.descriptor.headerTimeoutMs,
         userId,
       });
 
@@ -1190,6 +1193,8 @@ interface ArtifactRequestParams {
   model: LanguageModelV1;
   provider: string;
   providerModelId: string;
+  /** Slow-model header budget, carried from the descriptor. See GenerateArtifactOptions. */
+  headerTimeoutMs?: number;
   /** Owner of the conversation, from the session. Stamped onto the artifact. */
   userId: string;
 }
@@ -1221,6 +1226,7 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
     model,
     provider,
     providerModelId,
+    headerTimeoutMs,
     userId,
   } = params;
 
@@ -1236,6 +1242,7 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
         userPrompt: promptText,
         contextPrompt: contextBlocks || undefined,
         model,
+        headerTimeoutMs,
       });
 
       if (!generation.ok) {
