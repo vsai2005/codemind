@@ -49,6 +49,32 @@ export type CheckName =
  */
 export type CheckStatus = "passed" | "failed" | "skipped";
 
+/**
+ * How much of the artifact was actually examined.
+ *
+ * WHY `ok` IS NOT ENOUGH ON ITS OWN
+ * `ok` is `errors.length === 0`, so it reads the same whether four checks passed or
+ * four were SKIPPED. Measured on the first ten persisted artifacts: three of them
+ * passed with zero checks run — every single-file artifact skips all four, because
+ * import resolution, manifest coherence and required files are meaningless for one
+ * file. Nothing downstream could tell those apart from a fully checked project.
+ *
+ * That is the same confusion `skipped` already prevents per check, one level up. The
+ * vocabulary is deliberately the existing one: `partial` matches `symbols-partial` in
+ * the repository coverage limitations rather than inventing a parallel set of words.
+ *
+ * DELIBERATELY NOT BLOCKING. `unchecked` is a normal, correct outcome for a single-file
+ * artifact; refusing those would be a regression, and this field exists to describe
+ * what happened, not to change it.
+ */
+export type VerificationCoverage =
+  /** Every check ran. */
+  | "checked"
+  /** Some ran, some were skipped. */
+  | "partial"
+  /** Nothing ran. `ok` is still true, and means only that nobody objected. */
+  | "unchecked";
+
 /** Machine-readable finding subtypes. Kept narrow so routing can switch on them. */
 export type FindingCode =
   | "unresolved-internal-import"
@@ -90,6 +116,11 @@ export interface CheckOutcome {
 export interface VerificationReport {
   /** False when any error was found. Warnings never affect this. */
   ok: boolean;
+  /**
+   * How much was examined. Derived from `checks`, never set independently — a
+   * hand-set value could disagree with the list it summarises.
+   */
+  coverage: VerificationCoverage;
   errors: VerificationFinding[];
   warnings: VerificationFinding[];
   /** One entry per check, including the ones that did not run. */
@@ -177,6 +208,27 @@ function outcome(
   };
 }
 
+/**
+ * Derive coverage from what the checks actually did.
+ *
+ * The two "unchecked" guards below are DEFENSIVE and unreachable on today's inputs:
+ * `required-files` and `structural-sanity` are pushed with no skip condition, so any
+ * artifact reaching this point has at least two checks that ran. The genuinely
+ * all-skipped cases — a pdf, a single-file artifact — return early through
+ * `allSkipped`, which states "unchecked" directly and never calls this.
+ *
+ * Recorded as measured rather than assumed: a mutation disabling the `ran === 0` branch
+ * failed no test, which is the signature of unreachable code and not of a weak test.
+ * Kept because the alternative is that adding a skip condition to one of those two
+ * checks silently starts reporting "partial" for an artifact where nothing ran.
+ */
+function coverageOf(checks: readonly CheckOutcome[]): VerificationCoverage {
+  if (checks.length === 0) return "unchecked";
+  const ran = checks.filter((c) => c.status !== "skipped").length;
+  if (ran === 0) return "unchecked";
+  return ran === checks.length ? "checked" : "partial";
+}
+
 /** A report where every check is recorded as not having run, with the reason. */
 function allSkipped(reason: string): VerificationReport {
   const names: CheckName[] = [
@@ -187,6 +239,7 @@ function allSkipped(reason: string): VerificationReport {
   ];
   return {
     ok: true,
+    coverage: "unchecked",
     errors: [],
     warnings: [],
     checks: names.map((check) => ({
@@ -489,6 +542,7 @@ export function verifyArtifact(artifact: NormalizedArtifact): VerificationReport
 
   return {
     ok: collector.errors.length === 0,
+    coverage: coverageOf(checks),
     errors: collector.errors,
     warnings: collector.warnings,
     checks,
@@ -557,6 +611,12 @@ export type ArtifactStage =
 export interface ArtifactAttempt {
   ok: boolean;
   stage: ArtifactStage;
+  /**
+   * Present only where a verification report exists. Absent for failures that never
+   * reached the gate — a generation that never parsed has no coverage to report, and
+   * defaulting it would put "unchecked" on turns that were never checkable.
+   */
+  coverage?: VerificationCoverage;
   /** Which artifact type was asked for, so rates can be split by kind. */
   type: string;
   /** Present only for a verification failure — the checks that produced errors. */
@@ -576,6 +636,7 @@ export function attemptFromReport(
   return {
     ok: false,
     stage: "verification",
+    coverage: report.coverage,
     type,
     failedChecks: report.checks.filter((c) => c.status === "failed").map((c) => c.check),
     errorCodes: report.errors.map((e) => e.code),

@@ -1369,6 +1369,10 @@ ${warningNote}`
             ok: true,
             stage: "persisted",
             type: intent,
+            // Recorded so a later measurement can filter on it. A pass with coverage
+            // "unchecked" and a pass with coverage "checked" are both ok:true, and
+            // only this distinguishes them.
+            coverage: generation.verification.coverage,
             warningCount: generation.verification.warnings.length,
             version: 1,
           },
