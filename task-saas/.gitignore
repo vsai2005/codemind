@@ -41,3 +41,6 @@ next-env.d.ts
 # removed: it shadows .env.example, a file this repo deliberately tracks. The
 # real env files are already covered by `.env*.local` and `.env` above.
 .vercel
+
+# Measurement script output (scripts/measure-artifacts.ts). Local evidence, never committed.
+.measure/
