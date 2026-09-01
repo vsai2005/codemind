@@ -44,3 +44,10 @@ next-env.d.ts
 
 # Measurement script output (scripts/measure-artifacts.ts). Local evidence, never committed.
 .measure/
+
+# Claude Code local dev config. launch.json names the dev-server command and port
+# for THIS machine, and settings.local.json is local by convention. The rest of
+# .claude/ is deliberately NOT ignored -- settings.json, skills, agents, and
+# commands are shareable, and a blanket rule would silently block them later.
+.claude/launch.json
+.claude/settings.local.json
