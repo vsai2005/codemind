@@ -803,6 +803,9 @@ export async function POST(req: Request): Promise<Response> {
         // This dispatch returns before the streaming path's header-timeout block, so
         // the budget has to travel with the request rather than being applied there.
         headerTimeoutMs: resolved.descriptor.headerTimeoutMs,
+        // The registry's declared ceiling for this model. Artifact generation used to
+        // send a flat env value that ignored it, asking 8192-token models for 16000.
+        modelMaxOutputTokens: resolved.descriptor.maxOutputTokens,
         userId,
       });
 
@@ -1195,6 +1198,8 @@ interface ArtifactRequestParams {
   providerModelId: string;
   /** Slow-model header budget, carried from the descriptor. See GenerateArtifactOptions. */
   headerTimeoutMs?: number;
+  /** The model's declared output ceiling, carried from the descriptor. */
+  modelMaxOutputTokens: number;
   /** Owner of the conversation, from the session. Stamped onto the artifact. */
   userId: string;
 }
@@ -1227,6 +1232,7 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
     provider,
     providerModelId,
     headerTimeoutMs,
+    modelMaxOutputTokens,
     userId,
   } = params;
 
@@ -1243,6 +1249,7 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
         contextPrompt: contextBlocks || undefined,
         model,
         headerTimeoutMs,
+        modelMaxOutputTokens,
       });
 
       if (!generation.ok) {

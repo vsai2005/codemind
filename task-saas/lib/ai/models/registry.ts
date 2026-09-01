@@ -1,4 +1,5 @@
 import { getContextTokenLimit, getOutputTokenLimit } from "@/lib/ai/context-manager";
+import { getArtifactOutputTokenLimit } from "@/lib/env";
 import { getProviderAdapter } from "./providers";
 import type { ClientModelInfo, ModelDescriptor, ResolvedModel } from "./types";
 
@@ -322,4 +323,38 @@ export function resolveModel(id: string): ResolvedModel {
     effectiveContextTokens,
     effectiveOutputTokens,
   };
+}
+
+/**
+ * Output budget for an ARTIFACT generation on a given model.
+ *
+ * THE DEFECT THIS CLOSES
+ * `generateArtifact` passed `getArtifactOutputTokenLimit()` straight through — a flat
+ * 16,000 regardless of which model was answering. Nemotron and Gemini both declare
+ * 8,192, so the artifact path asked for roughly twice what those models advertise,
+ * while the chat path two lines above correctly clamped to the descriptor. The registry
+ * is the authority on what a model can produce, and exactly one path was bypassing it.
+ *
+ * SAME SHAPE AS `effectiveOutputTokens`, DIFFERENT BUDGET. The tightest of the two
+ * ceilings wins: the model's declared maximum and the operator's env budget. So
+ * AI_ARTIFACT_MAX_OUTPUT_TOKENS can always lower the limit and can never raise it past
+ * what the model says it can emit — the same rule the chat path follows.
+ *
+ * WHY THIS IS A FUNCTION AND NOT A FIELD ON `ResolvedModel`
+ * `effectiveContextTokens` and `effectiveOutputTokens` are computed once, when the model
+ * is resolved. That is fine for chat, which resolves per request. It is WRONG here: the
+ * measurement harness resolves a model once at startup and then lowers
+ * AI_ARTIFACT_MAX_OUTPUT_TOKENS per case to force truncation deterministically. A field
+ * captured at resolve time would freeze the startup value and silently ignore that,
+ * turning the truncation fixture into a test of nothing. Reading the environment at
+ * generation time keeps the override live.
+ *
+ * `modelMaxOutputTokens` is optional because `generateArtifact` may fall back to the
+ * gateway's default model, which reaches it as an opaque `LanguageModelV1` with no
+ * descriptor attached. Absent means "no declared ceiling known", which yields the env
+ * budget alone — the previous behaviour, unchanged, for that one path.
+ */
+export function artifactOutputTokensFor(modelMaxOutputTokens?: number): number {
+  const budget = getArtifactOutputTokenLimit();
+  return modelMaxOutputTokens === undefined ? budget : Math.min(modelMaxOutputTokens, budget);
 }

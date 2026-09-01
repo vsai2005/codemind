@@ -5,6 +5,7 @@ import { validateArtifact } from "./validate";
 import { verifyArtifact, type ArtifactStage, type VerificationReport } from "./verify";
 import { scrubForLog } from "@/lib/ai/failure-classification";
 import { getArtifactOutputTokenLimit } from "@/lib/env";
+import { artifactOutputTokensFor } from "@/lib/ai/models/registry";
 import { HEADER_TIMEOUT_HEADER } from "@/lib/ai/fetch-timeout";
 import { ARTIFACT_LIMITS, type ArtifactType, type NormalizedArtifact } from "./types";
 
@@ -161,6 +162,18 @@ export interface GenerateArtifactOptions {
    * default" rather than "no timeout".
    */
   headerTimeoutMs?: number;
+  /**
+   * The selected model's DECLARED output ceiling, from its registry descriptor.
+   *
+   * Passed in rather than resolved here because `model` above arrives as an opaque
+   * `LanguageModelV1` with no route back to the descriptor it came from. Re-resolving
+   * by id inside this function would mean looking up a model that might not be the one
+   * actually being called — a limit and a model that disagree is worse than no clamp.
+   * Both real callers already hold a `ResolvedModel`, so the number is free to them.
+   *
+   * Absent means "unknown ceiling": the env budget applies alone, as it always did.
+   */
+  modelMaxOutputTokens?: number;
 }
 
 /**
@@ -191,7 +204,8 @@ function defaultSummary(artifact: NormalizedArtifact): string {
 export async function generateArtifact(
   options: GenerateArtifactOptions
 ): Promise<ArtifactGeneration> {
-  const { type, userPrompt, contextPrompt, signal, headerTimeoutMs } = options;
+  const { type, userPrompt, contextPrompt, signal, headerTimeoutMs, modelMaxOutputTokens } =
+    options;
 
   const system = contextPrompt
     ? `${instructionsFor(type)}\n\n--- CONVERSATION CONTEXT ---\n${contextPrompt}`
@@ -210,7 +224,7 @@ export async function generateArtifact(
       model: options.model ?? getModel(),
       system,
       prompt: userPrompt,
-      maxTokens: getArtifactOutputTokenLimit(),
+      maxTokens: artifactOutputTokensFor(modelMaxOutputTokens),
       // The gateway owns failover across API keys; SDK-level retry would multiply
       // against it and re-run an expensive generation several times over.
       maxRetries: 0,
