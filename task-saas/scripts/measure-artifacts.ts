@@ -34,6 +34,15 @@ import { getArtifactOutputTokenLimit } from "@/lib/env";
 import { estimateTokens } from "@/lib/ai/context-manager";
 import type { ArtifactType } from "@/lib/artifacts/types";
 import { backoffFor, jittered, looksRateLimited } from "./lib/backoff";
+import {
+  attemptsFor,
+  initialBreaker,
+  recordFailure,
+  recordSuccess,
+  type BreakerState,
+  type FailureKind,
+} from "./lib/circuit";
+import { summarise, writeRunOutputs } from "./lib/run-output";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -119,9 +128,14 @@ async function main(): Promise<void> {
   const results: Record<string, unknown>[] = [];
   let rateLimitWaits = 0;
   let totalWaitMs = 0;
+  let breaker: BreakerState = initialBreaker();
+  let planned = 0;
 
   for (const arm of arms) {
     for (const c of cases) {
+      planned++;
+      if (breaker.tripped) continue;
+
       const previousLimit = process.env.AI_ARTIFACT_MAX_OUTPUT_TOKENS;
       if (c.outputTokenLimit) {
         process.env.AI_ARTIFACT_MAX_OUTPUT_TOKENS = String(c.outputTokenLimit);
@@ -133,7 +147,12 @@ async function main(): Promise<void> {
       let waitedMs = 0;
       const started = Date.now();
 
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // Recomputed each attempt: a turn that is rate-limited when the run has already
+      // burned one full backoff cycle gets no retries, because the cycle disproved the
+      // burst hypothesis it was testing.
+      let allowedAttempts = maxAttempts;
+
+      for (let attempt = 0; attempt < allowedAttempts; attempt++) {
         gen = await generateArtifact({
           type: c.type,
           userPrompt: c.prompt,
@@ -144,10 +163,12 @@ async function main(): Promise<void> {
 
         // Only an infrastructure failure is retried. Everything else IS the measurement.
         if (gen.ok || gen.stage !== "generation") break;
-        if (attempt === maxAttempts - 1) break;
 
         const message = gen.errors[0] ?? "";
         const rateLimited = looksRateLimited(message);
+        allowedAttempts = attemptsFor(breaker, rateLimited ? "rate-limit" : "transport", maxAttempts);
+        if (attempt >= allowedAttempts - 1) break;
+
         const wait = jittered(backoffFor(message, attempt));
         if (rateLimited) rateLimitWaits++;
         retries++;
@@ -162,6 +183,21 @@ async function main(): Promise<void> {
       if (c.outputTokenLimit) {
         if (previousLimit === undefined) delete process.env.AI_ARTIFACT_MAX_OUTPUT_TOKENS;
         else process.env.AI_ARTIFACT_MAX_OUTPUT_TOKENS = previousLimit;
+      }
+
+      // The breaker sees TURNS, not attempts: a turn has already exhausted whatever
+      // retries it was allowed by the time it lands here.
+      if (gen!.ok) {
+        breaker = recordSuccess(breaker);
+      } else if (gen!.stage === "generation") {
+        const kind: FailureKind = looksRateLimited(gen!.errors[0] ?? "")
+          ? "rate-limit"
+          : "transport";
+        breaker = recordFailure(breaker, kind);
+      } else {
+        // A validation or verification failure means the provider answered. That is the
+        // measurement working, so it clears the breaker rather than counting toward it.
+        breaker = recordSuccess(breaker);
       }
 
       const durationMs = Date.now() - started;
@@ -250,17 +286,30 @@ async function main(): Promise<void> {
     }
   }
 
-  writeFileSync(join(outDir, "results.json"), JSON.stringify(results, null, 2), "utf-8");
+  const summary = summarise({ breaker, planned, results, rateLimitWaits, totalWaitMs });
+
+  // Written on EVERY exit, tripped or not. A run that stopped early still measured
+  // whatever it measured, and losing that would make the abort worse than the failure
+  // it was avoiding.
+  writeRunOutputs(outDir, results, summary);
 
   const byStage = results.reduce<Record<string, number>>((acc, r) => {
     const stage = String(r.stage);
     acc[stage] = (acc[stage] ?? 0) + 1;
     return acc;
   }, {});
+
+  if (breaker.tripped) {
+    // An explicit outcome, not a crash and not a silent partial result.
+    console.log(`\nABORTED - circuit breaker tripped.`);
+    console.log(`  ${breaker.reason}`);
+    console.log(`  ran ${summary.ran} of ${summary.planned} cases, skipped ${summary.skipped}.`);
+  }
+
   console.log(`\nturns=${results.length} ${JSON.stringify(byStage)}`);
   console.log(
-    `retries=${results.reduce((s, r) => s + Number(r.retries), 0)} rateLimitWaits=${rateLimitWaits} ` +
-      `totalWait=${Math.round(totalWaitMs / 1000)}s`
+    `retries=${summary.retries} rateLimitWaits=${rateLimitWaits} ` +
+      `totalWait=${summary.totalWaitSeconds}s`
   );
   console.log(`results written to ${outDir}`);
 
