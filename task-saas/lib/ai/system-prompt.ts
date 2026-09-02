@@ -105,6 +105,27 @@ export const DEFAULT_CAPABILITY_PROFILE: CapabilityProfile = {
  *
  * Measured at the time of writing: identity 40, capabilities 71, guardrails 307,
  * grounding 114, outputContract 106, artifactRules 176.
+ */
+/**
+ * RE-DERIVED 2026-09-03 after the estimator calibration, which changed what these
+ * ceilings measure without changing what they were meant to assert.
+ *
+ * Each was originally set ~10% above its measured layer size. The calibration moved
+ * prose-heavy layers by about 20% (divisor 4.0 -> 5.0) and left dense ones alone, so
+ * the headroom silently spread from a consistent ~10% to between 10% and 41% — a
+ * tripwire that fires a third of the way late is not the tripwire that was written.
+ *
+ *   layer            old ceiling   measured   headroom   re-derived
+ *   identity                  45         32      40.6%           36
+ *   capabilities              78         57      36.8%           63
+ *   guardrails               338        307      10.1%          338  (unchanged)
+ *   grounding                126         92      37.0%          102
+ *   outputContract           117        106      10.4%          117  (unchanged)
+ *   artifactRules            194        141      37.6%          156
+ *
+ * guardrails and outputContract did not move at all: both are dense enough to stay in
+ * the same punctuation bucket, which is a useful check that the drift is real and
+ * content-dependent rather than a uniform rescaling.
  *
  * Deliberately NOT summed into the whole-prompt budget. estimateTokens is
  * content-aware: it picks a divisor from punctuation density, so a dense layer scores
@@ -112,15 +133,15 @@ export const DEFAULT_CAPABILITY_PROFILE: CapabilityProfile = {
  * invariant the estimator does not actually hold.
  */
 export const LAYER_TOKEN_BUDGETS = {
-  identity: 45,
-  capabilities: 78,
+  identity: 36,
+  capabilities: 63,
   guardrails: 338,
   /** Repository grounding. Only paid when source files are attached. */
-  grounding: 126,
+  grounding: 102,
   /** The tool-call prohibition. Unconditional, so this is the floor for every turn. */
   outputContract: 117,
   /** Artifact and download rules. Dropped when the user mentions no file at all. */
-  artifactRules: 194,
+  artifactRules: 156,
 } as const;
 
 /**
@@ -129,11 +150,21 @@ export const LAYER_TOKEN_BUDGETS = {
  * The task-context layer is charged against the conversation budget instead.
  *
  * This must cover the WORST case, not the common one. Since the rule layers became
- * conditional the spread is wide — measured: 203 for a plain chat turn, 318 with a
- * repository attached, 380 when a file is mentioned, and 494 for a repo-backed request
- * that also mentions a file. The reserve is a single constant subtracted before
- * anything about the turn is known, so it is sized to that 494 worst case with ~5%
- * headroom for rewording.
+ * conditional the spread is wide. RE-MEASURED 2026-09-03 after the estimator
+ * calibration, alongside the original figures it was sized against:
+ *
+ *   scenario                  before   after
+ *   plain chat                   203     163
+ *   repository attached          318     254
+ *   file mentioned               380     304
+ *   repo + file mentioned        494     395   <- the worst case this is sized to
+ *
+ * 520 gave 5.3% headroom over the old worst case, exactly as designed. Against the new
+ * one it gave 31.6% — six times looser, so a prompt could grow a third before the
+ * warning fired. 415 restores the original ~5%.
+ *
+ * The four figures reproduce the old ones exactly when computed with the pre-calibration
+ * divisors, which is what confirms the drift is the estimator's and not a prompt edit.
  *
  * NOT sized to absorb the additive-accounting drift between this reserve and the
  * conversation budget (measured up to +225 tokens on a large dense-code context).
@@ -142,7 +173,7 @@ export const LAYER_TOKEN_BUDGETS = {
  * absorbed by SAFETY_MARGIN_RATIO instead. See the drift test in
  * __tests__/lib/system-prompt.test.ts.
  */
-export const STATIC_PROMPT_TOKEN_BUDGET = 520;
+export const STATIC_PROMPT_TOKEN_BUDGET = 415;
 
 export type PromptLayerName = keyof typeof LAYER_TOKEN_BUDGETS;
 

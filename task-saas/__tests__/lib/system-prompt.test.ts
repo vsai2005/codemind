@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { estimateTokens } from "@/lib/ai/context-manager";
+import { estimateTokens, SYSTEM_PROMPT_RESERVE } from "@/lib/ai/context-manager";
 import {
   buildStaticLayers,
   buildSystemPrompt,
@@ -144,10 +144,58 @@ describe("buildSystemPrompt", () => {
       );
     });
 
+    it("keeps every layer ceiling within its intended headroom band", () => {
+      /**
+       * ADDED 2026-09-03 AFTER MUTATION TESTING, which found the real gap: every other
+       * test here asserts `measured <= ceiling`, a ONE-SIDED bound. It catches a layer
+       * that grew and says nothing about a ceiling that drifted upward — so reverting
+       * identity from 36 back to 45, or grounding from 102 back to 126, passed the whole
+       * suite. That is precisely how the estimator calibration was able to loosen these
+       * from a consistent ~10% headroom to as much as 41% without a single test noticing.
+       *
+       * The band is stated in LITERAL percentages, never derived from the constants under
+       * test. 5% is enough room for rewording; 20% is loose enough to tolerate ordinary
+       * prompt edits and tight enough that a 37% drift fails.
+       */
+      const measured: Record<string, number> = {
+        identity: estimateTokens(layers.identity),
+        capabilities: estimateTokens(layers.capabilities),
+        guardrails: estimateTokens(layers.guardrails),
+        grounding: estimateTokens(layers.grounding),
+        outputContract: estimateTokens(layers.outputContract),
+        artifactRules: estimateTokens(layers.artifactRules),
+      };
+
+      for (const [name, ceiling] of Object.entries(LAYER_TOKEN_BUDGETS)) {
+        const actual = measured[name];
+        const headroom = ((ceiling - actual) / actual) * 100;
+
+        expect(headroom, `${name} headroom ${headroom.toFixed(1)}%`).toBeGreaterThanOrEqual(5);
+        expect(headroom, `${name} headroom ${headroom.toFixed(1)}%`).toBeLessThanOrEqual(20);
+      }
+    });
+
     it("keeps the assembled static layers inside the context-manager reserve", () => {
-      // Must stay in step with SYSTEM_PROMPT_RESERVE in lib/ai/context-manager.ts.
+      /**
+       * 520 -> 415 on 2026-09-03. The estimator calibration left this ceiling measuring
+       * a fifth less than when it was sized: it gave 5.3% headroom over the worst-case
+       * prompt as designed, and 31.6% afterwards. 415 restores the original ~5%.
+       *
+       * This literal is the guard that caught the change — it is meant to fail whenever
+       * the constant moves, so that moving it is a decision rather than a side effect.
+       */
       expect(estimateTokens(buildSystemPrompt())).toBeLessThanOrEqual(STATIC_PROMPT_TOKEN_BUDGET);
-      expect(STATIC_PROMPT_TOKEN_BUDGET).toBe(520);
+      expect(STATIC_PROMPT_TOKEN_BUDGET).toBe(415);
+    });
+
+    it("stays in step with the reserve context-manager actually subtracts against", () => {
+      /**
+       * ADDED 2026-09-03. These two constants must be equal, and until now only a code
+       * comment said so — changing the ceiling meant remembering to find the reserve by
+       * hand in another module. That is the same drift that put two different
+       * chars-per-token numbers in two files.
+       */
+      expect(STATIC_PROMPT_TOKEN_BUDGET).toBe(SYSTEM_PROMPT_RESERVE);
     });
   });
 
@@ -308,7 +356,7 @@ describe("buildSystemPrompt", () => {
         buildSystemPrompt({ hasRepositoryContext: true, includeArtifactRules: true })
       );
       expect(worst).toBeLessThanOrEqual(STATIC_PROMPT_TOKEN_BUDGET);
-      expect(STATIC_PROMPT_TOKEN_BUDGET).toBe(520);
+      expect(STATIC_PROMPT_TOKEN_BUDGET).toBe(415);
     });
   });
 });

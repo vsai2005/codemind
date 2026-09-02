@@ -203,7 +203,13 @@ export function editOutputTokens(content: string): number {
  *
  * Max on a complete reply: 217. The reserve is 512 — roughly 2.4x that — and the
  * headroom is deliberate, because the sample is small (n=6, one model, one file per
- * prompt) and every prompt asked for a terse change. A model that chooses to explain
+ * prompt) and every prompt asked for a terse change.
+ *
+ * RE-CHECKED 2026-09-03 after the estimator calibration, since those figures were
+ * measured with the old divisors. Recomputed on the same replies the overheads become
+ * 56, 180, 134, 204 and 42, so the maximum falls 217 -> 204 and the reserve is now 2.5x
+ * rather than 2.4x. The value stands: it moved in the safe direction and by less than
+ * the rounding this constant was already carrying. A model that chooses to explain
  * its reasoning at length, or lists the edits it made before the block, spends more
  * than any of these did and nothing caps it.
  *

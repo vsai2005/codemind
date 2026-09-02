@@ -33,8 +33,12 @@ import { logger } from "@/lib/logger";
  * the conversation window instead of tripping a fixed reserve. Exceeding this is a bug
  * — buildSystemPrompt warns, and the per-layer ceilings in STATIC_PROMPT_TOKEN_BUDGET
  * name which layer grew. Keep the two numbers in step.
+ *
+ * Lowered 520 -> 415 on 2026-09-03 with STATIC_PROMPT_TOKEN_BUDGET, because the
+ * estimator calibration left both measuring a fifth less than when they were sized.
+ * See that constant for the four re-measured scenarios.
  */
-const SYSTEM_PROMPT_RESERVE = 520;
+export const SYSTEM_PROMPT_RESERVE = 415;
 
 /**
  * Held back so an estimator miss cannot push the request past the provider ceiling.
@@ -145,6 +149,16 @@ export const ENCODED_RUN_THRESHOLD = 60;
  * Derived from CHARS_PER_TOKEN.source rather than written as its own literal, so a
  * future calibration of the source ratio moves byte pricing with it by construction —
  * which is the whole reason these numbers now live together.
+ *
+ * THIS FACTOR IS NOT A MEASURED ERROR RATE, and must not be cited as one. 0.9375 was
+ * chosen because 3.2 x 0.9375 is exactly 3.0, which is the number byte pricing already
+ * used — so consolidating the constants could not move file ranking. It is a
+ * behaviour-preservation constant wearing the shape of a calibration.
+ *
+ * What IS evidence-backed is the direction and the rough size: 3.0 sits below the 3.25
+ * minimum measured for real TypeScript, so byte pricing stays pessimistic. If the
+ * source ratio is ever recalibrated, this factor deserves to be re-derived from
+ * measurement rather than carried forward.
  */
 export const SIZE_ONLY_PESSIMISM = 0.9375;
 
