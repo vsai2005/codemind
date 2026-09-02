@@ -64,6 +64,7 @@ import {
   hubFiles,
   scoreFiles,
   selectWithinBudget,
+  MAX_REPOSITORY_FILES_PER_TURN,
 } from "@/lib/repo/selection";
 import { createHash } from "node:crypto";
 
@@ -208,7 +209,6 @@ const REPOSITORY_FETCH_ALLOWANCE_RATIO = 0.3;
  * pool. Raising it is the first thing to try when selection is right but the answer is
  * thin — and the first thing to suspect when the budget disappears.
  */
-const MAX_REPOSITORY_FILES_PER_TURN = 3;
 
 /**
  * How many files are expanded along the import graph, and the ceiling on rows read to
@@ -1837,8 +1837,8 @@ async function loadRepositoryFiles(params: {
      * RepositoryFile stores path, blobSha, size, language and symbols — no content —
      * and detectStructure sees only tree entries, so it records manifest PATHS and
      * never their bodies. Reading `main`/`module`/`exports`/`bin` would therefore cost
-     * one GitHub request per turn on top of the three files already fetched, breaking
-     * the per-turn fetch bound. Capturing it during ingestion is the right fix and is a
+     * one GitHub request per turn on top of the MAX_REPOSITORY_FILES_PER_TURN already
+     * fetched, breaking the per-turn fetch bound. Capturing it during ingestion is the right fix and is a
      * different change.
      *
      * Re-detecting here rather than trusting `repository.entryPoints` is what lets an

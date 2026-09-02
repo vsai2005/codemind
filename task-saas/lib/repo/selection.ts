@@ -576,6 +576,38 @@ export function expandAlongEdges(
 }
 
 /**
+ * How many repository files one turn may fetch and put in front of the model.
+ *
+ * RAISED 3 -> 10 on 2026-09-03, on measurement rather than intuition. Three real
+ * questions against the ky index, with ACTUAL provider usage rather than an estimate:
+ *
+ *   question                          cap 3                  cap 10
+ *   merge headers when extending      3 files,  8,120 tok    9 files, 81,471 tok
+ *   decide whether to retry           3 files, 27,736 tok   10 files, 79,500 tok
+ *   response body when timeout fires  3 files, 45,588 tok   10 files, 53,391 tok
+ *
+ * Against a 512,000-token window that is 1.6-8.9% at three files and 10.4-15.9% at
+ * ten. The token budget was never the constraint and still is not; THIS number was,
+ * and it was answering questions about a 54-file repository with three files.
+ *
+ * WHAT TEN COSTS. Each file is one GitHub request and the loop in the chat route is
+ * SERIAL — one await per file, no disk cache — so latency scales linearly at roughly
+ * 400-500ms per file. Measured on the same three questions, the fetch phase went from
+ * 1,333 / 1,627 / 2,054 ms to 4,443 / 3,869 / 3,663 ms: about 2.2 to 3.1 seconds added
+ * per repo-backed turn. That is the real price of this change and it is paid on every
+ * such turn, not just the ones that needed ten files.
+ *
+ * WHAT BOUNDS IT ABOVE. GitHub gives the server ~5,000 requests/hour on one shared
+ * token and the chat bucket allows 20 requests/minute per user. A single user
+ * sustaining that rate now spends 200 GitHub requests/minute rather than 60, which
+ * would exhaust the shared hourly pool in about 25 minutes instead of 83. Sustained
+ * max-rate chat is not realistic use, but the headroom that made this safe at three is
+ * materially thinner at ten, and a disk or memory cache for file contents is the thing
+ * that would restore it.
+ */
+export const MAX_REPOSITORY_FILES_PER_TURN = 10;
+
+/**
  * Take the highest-scoring files that fit a token allowance.
  *
  * Budgeted from the stored byte size rather than by fetching and measuring, so no
