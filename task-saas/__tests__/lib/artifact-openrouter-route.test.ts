@@ -44,9 +44,21 @@ describe("the OpenRouter Nemotron route", () => {
     const or = getModelDescriptor(OR)!;
 
     expect(or.headerTimeoutMs).toBe(240_000);
-    // The direct route does NOT get one — it measures a 9s median and a global raise
-    // would have loosened its deadline for nothing.
-    expect(getModelDescriptor(DIRECT)!.headerTimeoutMs).toBeUndefined();
+    /**
+     * The direct route now carries its OWN budget too, and the assertion changed
+     * because the evidence did.
+     *
+     * It originally had none, on the reasoning that it measured a 9s median and a
+     * raise would loosen a deadline for nothing. A 42-case run on that route then
+     * aborted at case 17: the three largest projects hit the global 180s ceiling on
+     * twelve consecutive attempts. The median was never the number that mattered — the
+     * tail was, and the tail was unmeasured when that reasoning was written.
+     *
+     * Asserted per route rather than as "some override exists", so the two cannot
+     * quietly converge on one value and lose the distinction between them.
+     */
+    expect(getModelDescriptor(DIRECT)!.headerTimeoutMs).toBe(300_000);
+    expect(or.headerTimeoutMs).not.toBe(getModelDescriptor(DIRECT)!.headerTimeoutMs);
   });
 
   it("leaves the direct NVIDIA entry byte-for-byte unchanged", () => {

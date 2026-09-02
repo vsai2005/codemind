@@ -140,6 +140,30 @@ function buildRegistry(): ModelDescriptor[] {
       providerModelId: process.env.NEMOTRON_MODEL || "nvidia/nemotron-3-ultra-550b-a55b",
       providerContextTokens: FRONTIER_CONTEXT_TOKENS,
       maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+      /**
+       * MEASURED 2026-09-02, and unlike most numbers in this file it is not an estimate.
+       * A 42-case run on this route aborted at case 17: the three largest projects
+       * (14-, 15- and 14-file) hit the global 180s non-streaming deadline on TWELVE
+       * consecutive attempts, `generationMs` pinned at 180,006-180,017ms every time.
+       * Nothing was wrong with the provider — the budget was simply below what those
+       * generations need, and the run died with 25 cases unmeasured.
+       *
+       * Chat is untouched: this is a per-descriptor override, so the streaming path
+       * keeps its 60s and a genuinely hung request still fails fast there.
+       *
+       * 300s is MAX_OVERRIDE_MS, the ceiling fetch-timeout.ts will honour. Chosen at the
+       * cap rather than below it because the evidence brackets it from both sides: the
+       * same three cases completed on the OpenRouter route in 170s, 218s and 250s, so
+       * 240s would have left roughly 20s of headroom on the slowest — and THIS route is
+       * demonstrably slower than that one for the same work. There is no room left to
+       * be conservative with; anything tighter is a guess that the next large project
+       * disproves.
+       *
+       * If a case ever needs more than 300s, the answer is not a bigger number: it is
+       * that one generation cannot hold the project, which is what the truncation stage
+       * already says honestly.
+       */
+      headerTimeoutMs: 300_000,
       supportsStreaming: true,
       supportsVision: false,
       strengths: ["Long Context", "Coding", "Reasoning"],
