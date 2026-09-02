@@ -89,6 +89,21 @@ const KIMI_K3_MAX_OUTPUT_TOKENS = 16_384;
 const INKLING_SMALL_MAX_OUTPUT_TOKENS = 32_768;
 
 /**
+ * Nemotron reached through OpenRouter rather than NVIDIA's own endpoint.
+ *
+ * SOURCED FROM OPENROUTER'S CATALOGUE ON 2026-09-02, not copied from the NVIDIA
+ * descriptor, and the numbers differ in BOTH directions: OpenRouter reports a 1,000,000
+ * context (not the 1,048,576 the direct entry uses) and a 65,536 output ceiling (not
+ * 8,192). Copying either constant across would have misdescribed the route.
+ *
+ * The output ceiling is the broker's, not the model's, and it is the one that binds on
+ * this path — so it is stated as its own constant rather than reusing a shared one that
+ * happens to be near it today.
+ */
+const OPENROUTER_NEMOTRON_CONTEXT_TOKENS = 1_000_000;
+const OPENROUTER_NEMOTRON_MAX_OUTPUT_TOKENS = 65_536;
+
+/**
  * MEASURED, not advertised. NVIDIA's /v1/models returns no context metadata for this
  * model and the endpoint accepts any max_tokens without complaint, so the window was
  * established by probing: a 546,087-token prompt was accepted and answered on
@@ -239,6 +254,52 @@ function buildRegistry(): ModelDescriptor[] {
        * video outright. So vision here means images, as it does for Gemini.
        */
       supportsVision: true,
+      strengths: ["Long Context", "Coding", "Reasoning"],
+      enabled: true,
+    },
+
+    {
+      /**
+       * THE SAME MODEL, A DIFFERENT ROUTE — and the id says so, because choosing this
+       * is choosing a broker, not a different set of weights. Both entries coexist
+       * deliberately: on 2026-09-02 NVIDIA's integrate API returned 503 for this model
+       * while OpenRouter served it in the same minute, which is only visible if a user
+       * can pick the route.
+       */
+      id: "nemotron-3-ultra-openrouter",
+      displayName: "Nemotron 3 Ultra (via OpenRouter)",
+      provider: "openrouter",
+      providerLabel: "OpenRouter",
+      /**
+       * Its OWN variable, not OPENROUTER_MODEL. That one is already read by the Inkling
+       * entry above, so a second entry sharing it would silently repoint both — the
+       * exact confusion that left an entry labelled "Inkling Small" serving Nemotron.
+       */
+      providerModelId:
+        process.env.OPENROUTER_NEMOTRON_MODEL || "nvidia/nemotron-3-ultra-550b-a55b:free",
+      providerContextTokens: OPENROUTER_NEMOTRON_CONTEXT_TOKENS,
+      maxOutputTokens: OPENROUTER_NEMOTRON_MAX_OUTPUT_TOKENS,
+      /**
+       * MEASURED 2026-09-02: a single-file artifact took 170s against the 180s
+       * non-streaming deadline — 5.9% headroom, on the SIMPLEST case in the measurement
+       * suite. OpenRouter reports reasoning default_enabled at "high" effort for this
+       * route, so the thinking pass dominates and scales with prompt difficulty; the
+       * 14- and 15-file zip cases are unmeasured here and will be slower.
+       *
+       * A per-descriptor budget rather than a higher global ceiling, for the reason
+       * fetch-timeout.ts already states: raising the shared number would loosen the
+       * deadline for direct NVIDIA too, which measures a 9s median. One slow route must
+       * not buy every other route four minutes of hanging.
+       *
+       * 240s is 41% over the single observation and matches Kimi's precedent, while
+       * staying under MAX_OVERRIDE_MS so there is room left. n=1 — revisit as soon as a
+       * multi-file case runs on this route.
+       */
+      headerTimeoutMs: 240_000,
+      supportsStreaming: true,
+      // OpenRouter lists input_modalities ["text"] for this route — no vision, matching
+      // the direct NVIDIA entry.
+      supportsVision: false,
       strengths: ["Long Context", "Coding", "Reasoning"],
       enabled: true,
     },
