@@ -625,19 +625,32 @@ export interface ArtifactAttempt {
   errorCodes?: FindingCode[];
   /** Warnings on a SUCCESSFUL attempt. Zero on any failure, which had none to raise. */
   warningCount: number;
+  /**
+   * Wall time inside the provider call, in ms. Optional, and the absence is meaningful:
+   * the 30 artifacts written before this field existed have no duration and cannot be
+   * given one, so `undefined` means "not recorded", never "instant". Reading it as zero
+   * would put a fleet of impossibly fast generations into any measurement taken over
+   * this column.
+   */
+  generationMs?: number;
   version: 1;
 }
 
 /** Build the attempt record for a verification failure, from its report. */
 export function attemptFromReport(
   report: VerificationReport,
-  type: string
+  type: string,
+  generationMs?: number
 ): ArtifactAttempt {
   return {
     ok: false,
     stage: "verification",
     coverage: report.coverage,
     type,
+    // Spread rather than assigned: writing `generationMs: undefined` would put an
+    // explicit null into the JSONB column, which reads as "measured, and it was
+    // nothing" instead of "this row predates the measurement".
+    ...(generationMs === undefined ? {} : { generationMs }),
     failedChecks: report.checks.filter((c) => c.status === "failed").map((c) => c.check),
     errorCodes: report.errors.map((e) => e.code),
     warningCount: 0,

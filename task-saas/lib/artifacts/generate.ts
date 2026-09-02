@@ -110,6 +110,8 @@ export type ArtifactGeneration =
       artifact: NormalizedArtifact;
       summary: string;
       usage: ArtifactUsage;
+      /** Wall time inside the provider call. See `generationMs` on the failure arm. */
+      generationMs: number;
       /**
        * Static verification result. Present on success including when it carries
        * warnings — an artifact is only `ok: true` if verification found no ERRORS.
@@ -119,6 +121,22 @@ export type ArtifactGeneration =
   | {
       ok: false;
       errors: string[];
+      /**
+       * Wall time inside the provider call, in ms — the generateText await ALONE, not
+       * the surrounding request.
+       *
+       * WHY THE NARROW SPAN. Durations for the 30 artifacts already in the database had
+       * to be reconstructed from consecutive message timestamps, which bundles parsing,
+       * validation, verification, the zip build and two DB writes into the number and
+       * therefore overstates generation. That reconstruction is what the 180s
+       * non-streaming deadline was sized against, so the estimate feeding a deadline
+       * was measuring the wrong thing.
+       *
+       * Recorded on FAILURES too, and that is where it earns most: a 1s failure is a
+       * rejected request, a 170s failure is a deadline, and the error strings for the
+       * two can be identical.
+       */
+      generationMs: number;
       /**
        * Which stage rejected it. Always set, because a failure that cannot say where it
        * happened is not measurable — and the responses differ: rising truncation means
@@ -219,6 +237,12 @@ export async function generateArtifact(
   // two different truths depending on which branch answered.
   let usage: ArtifactUsage = { promptTokens: null, completionTokens: null };
 
+  // The clock brackets the provider call and NOTHING else: not prompt assembly above,
+  // not parsing, validation, verification or persistence below. A span that includes
+  // those is what made the reconstructed estimates overstate generation.
+  const startedAt = Date.now();
+  let generationMs = 0;
+
   try {
     const result = await generateText({
       model: options.model ?? getModel(),
@@ -236,6 +260,8 @@ export async function generateArtifact(
         ? { headers: { [HEADER_TIMEOUT_HEADER]: String(headerTimeoutMs) } }
         : {}),
     });
+    // Stopped before the result is even unpacked, so no post-processing leaks in.
+    generationMs = Date.now() - startedAt;
     output = result.text;
     finishReason = result.finishReason;
     usage = {
@@ -243,6 +269,10 @@ export async function generateArtifact(
       completionTokens: toReportedCount(result.usage?.completionTokens),
     };
   } catch (error) {
+    // Stopped FIRST, before any error handling: a failure's duration is the whole point
+    // of recording it on this path — it is what separates a fast rejection from a
+    // deadline, which can carry an identical message.
+    generationMs = Date.now() - startedAt;
     const message = error instanceof Error ? error.message : "unknown error";
     // Scrubbed because this string is logged, streamed to the browser, AND persisted
     // as message content. Provider errors are the one place credentials could ever be
@@ -250,6 +280,7 @@ export async function generateArtifact(
     return {
       ok: false,
       stage: "generation",
+      generationMs,
       errors: [`artifact generation failed: ${scrubForLog(message)}`],
     };
   }
@@ -259,6 +290,7 @@ export async function generateArtifact(
     return {
       ok: false,
       stage: "truncation",
+      generationMs,
       errors: [
         "the project was larger than one generation can hold, so the output was cut off",
       ],
@@ -270,12 +302,13 @@ export async function generateArtifact(
     return {
       ok: false,
       stage: "parse",
+      generationMs,
       errors: parsed.errors.length > 0 ? parsed.errors : ["the model produced no usable artifact"],
     };
   }
 
   const validation = validateArtifact(parsed.artifact, type);
-  if (!validation.ok) return { ok: false, stage: "validation", errors: validation.errors };
+  if (!validation.ok) return { ok: false, stage: "validation", generationMs, errors: validation.errors };
 
   /**
    * Static verification, after per-file validation and before anything is persisted.
@@ -296,6 +329,7 @@ export async function generateArtifact(
     return {
       ok: false,
       stage: "verification",
+      generationMs,
       errors: verification.errors.map((finding) => finding.message),
       verification,
     };
@@ -303,6 +337,7 @@ export async function generateArtifact(
 
   return {
     ok: true,
+    generationMs,
     artifact: validation.artifact,
     summary: parsed.summary ?? defaultSummary(validation.artifact),
     usage,

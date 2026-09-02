@@ -1287,8 +1287,17 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
           // Recorded on the FAILURE path too, which is the entire point: without a row
           // here, rejected artifacts are invisible and every measurable rate is 100%.
           attempt: generation.verification
-            ? attemptFromReport(generation.verification, intent)
-            : { ok: false, stage: generation.stage, type: intent, warningCount: 0, version: 1 },
+            ? attemptFromReport(generation.verification, intent, generation.generationMs)
+            : {
+                ok: false,
+                stage: generation.stage,
+                type: intent,
+                warningCount: 0,
+                // A failure's duration is how a fast rejection is told from a deadline:
+                // the two can carry the same error string and mean opposite things.
+                generationMs: generation.generationMs,
+                version: 1,
+              },
         });
         writer.text(visible);
         await summarizeDropped(conversationId, userId, existingSummary, existingSummaryVersion, droppedMessagesContent);
@@ -1330,6 +1339,9 @@ function handleArtifactRequest(params: ArtifactRequestParams): Response {
             stage: "packaging",
             type: intent,
             warningCount: 0,
+            // The generation itself succeeded here — this duration is real and worth
+            // keeping even though the turn failed later.
+            generationMs: generation.generationMs,
             version: 1,
           },
         });
@@ -1388,6 +1400,10 @@ ${warningNote}`
             // only this distinguishes them.
             coverage: generation.verification.coverage,
             warningCount: generation.verification.warnings.length,
+            // The provider call ALONE. Durations for the rows written before this
+            // existed had to be reconstructed from message timestamps, which bundles
+            // validation, verification, packaging and two DB writes into the number.
+            generationMs: generation.generationMs,
             version: 1,
           },
         }
