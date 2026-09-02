@@ -44,6 +44,7 @@ import { releaseOnStreamEnd } from "@/lib/ai/stream-lifecycle";
 import { buildPlan, planToPromptBlock, type ChatPlan } from "@/lib/ai/planning";
 import { createDataStreamPrefix } from "@/lib/ai/plan-stream";
 import { guardChatStream } from "@/lib/ai/chat-output-guard";
+import { guardEditTruncation } from "@/lib/ai/edit-truncation-guard";
 import { logger } from "@/lib/logger";
 // Prisma is used as a value here (Prisma.DbNull), not only as a type.
 import { Prisma } from "@prisma/client";
@@ -790,6 +791,8 @@ export async function POST(req: Request): Promise<Response> {
      * case, which would need an artifact type, a migration and a download path.
      */
     const editIntent = intent || image || !repository ? null : detectEditIntent(userText);
+    /** Set once an edit is going ahead, so the stream backstop knows what to check. */
+    let editTargetPath: string | null = null;
 
     // Planning stage. Runs before generation on a small, targeted slice of context —
     // the request plus assembled memory, never the full window. Returns null for
@@ -821,7 +824,8 @@ export async function POST(req: Request): Promise<Response> {
       const resolution = resolveEditTarget(
         editIntent,
         repositoryFiles ?? [],
-        context.repositoryFilesWhole
+        context.repositoryFilesWhole,
+        resolved.effectiveOutputTokens
       );
 
       if (resolution.kind !== "ready") {
@@ -840,7 +844,14 @@ export async function POST(req: Request): Promise<Response> {
        * under context pressure below, so a second call is an established cost, not a
        * new one.
        */
-      context = buildContext(undefined, editNoteFor(resolution.path));
+      editTargetPath = resolution.path;
+      context = buildContext(
+        undefined,
+        editNoteFor(
+          resolution.path,
+          repositoryFiles?.find((f) => f.path === resolution.path)?.content ?? ""
+        )
+      );
     }
 
     if (intent) {
@@ -1169,6 +1180,18 @@ export async function POST(req: Request): Promise<Response> {
       ? createDataStreamPrefix(streamed, [{ codemindPlan: plan } as never])
       : streamed;
 
+    /**
+     * Whole-file edits get a truncation backstop. Applied only on an edit turn, because
+     * an ordinary chat reply that happens to contain a fenced snippet is not claiming to
+     * be a complete file and must not be warned about.
+     */
+    const guarded = editTargetPath
+      ? guardEditTruncation(withPlan, {
+          conversationId: activeConversationId,
+          path: editTargetPath,
+        })
+      : withPlan;
+
     // Released when the client finishes reading or the stream errors — and, failing
     // both, reclaimed by the timeout so the slot cannot leak.
     //
@@ -1177,7 +1200,7 @@ export async function POST(req: Request): Promise<Response> {
     // turn the user had already paid for. `continueOnCancel` keeps the generation
     // running so onFinish still writes it, and it is waiting when they come back.
     slotHandedToStream = true;
-    return releaseOnStreamEnd(withPlan, {
+    return releaseOnStreamEnd(guarded, {
       onSettled: releaseSlot,
       continueOnCancel: true,
       timeoutMs: GENERATION_SLOT_MAX_LIFETIME_MS,

@@ -3,6 +3,9 @@ import { detectArtifactIntent, detectEditIntent } from "@/lib/ai/intent";
 import { resolveEditTarget, editNoteFor, editRefusalText } from "@/lib/ai/repo-edit";
 import { ContextManager } from "@/lib/ai/context-manager";
 
+/** Generous enough that no fixture below trips the size precondition by accident. */
+const BUDGET = 8192;
+
 /**
  * Slice one of repository editing: propose an edit inline, refuse when the file was not
  * seen whole.
@@ -86,12 +89,15 @@ describe("artifact requests are unaffected", () => {
 });
 
 describe("resolving a loosely-named target", () => {
-  const fetched = [{ path: "src/routes/auth.ts" }, { path: "src/retry.ts" }];
+  const fetched = [
+    { path: "src/routes/auth.ts", content: "export const a = 1;" },
+    { path: "src/retry.ts", content: "export const a = 1;" },
+  ];
 
   it("matches a bare filename to its full path", () => {
     const r = resolveEditTarget({ namedPath: "auth.ts", reason: "" }, fetched, [
       "src/routes/auth.ts",
-    ]);
+    ], BUDGET);
 
     expect(r).toEqual({ kind: "ready", path: "src/routes/auth.ts" });
   });
@@ -99,9 +105,9 @@ describe("resolving a loosely-named target", () => {
   it("does not match a filename that is only a suffix of another name", () => {
     // "auth.ts" must not resolve to "oauth.ts" — the match is anchored on a path
     // segment, so a user asking about one file cannot be given the other.
-    const r = resolveEditTarget({ namedPath: "auth.ts", reason: "" }, [{ path: "src/oauth.ts" }], [
+    const r = resolveEditTarget({ namedPath: "auth.ts", reason: "" }, [{ path: "src/oauth.ts", content: "export const a = 1;" }], [
       "src/oauth.ts",
-    ]);
+    ], BUDGET);
 
     expect(r.kind).toBe("not-found");
   });
@@ -112,16 +118,16 @@ describe("resolving a loosely-named target", () => {
     const r = resolveEditTarget({ namedPath: null, reason: "" }, fetched, [
       "src/routes/auth.ts",
       "src/retry.ts",
-    ]);
+    ], BUDGET);
 
     expect(r.kind).toBe("ambiguous");
     if (r.kind === "ambiguous") expect(r.candidates).toHaveLength(2);
   });
 
   it("accepts a described target when only one file was fetched", () => {
-    const r = resolveEditTarget({ namedPath: null, reason: "" }, [{ path: "src/retry.ts" }], [
+    const r = resolveEditTarget({ namedPath: null, reason: "" }, [{ path: "src/retry.ts", content: "export const a = 1;" }], [
       "src/retry.ts",
-    ]);
+    ], BUDGET);
 
     expect(r).toEqual({ kind: "ready", path: "src/retry.ts" });
   });
@@ -129,14 +135,14 @@ describe("resolving a loosely-named target", () => {
   it("reports an honest failure for a file that was not fetched", () => {
     const r = resolveEditTarget({ namedPath: "missing.ts", reason: "" }, fetched, [
       "src/retry.ts",
-    ]);
+    ], BUDGET);
 
     expect(r.kind).toBe("not-found");
     if (r.kind === "not-found") expect(r.available).toEqual(fetched.map((f) => f.path));
   });
 
   it("reports no-files when the repository could not be read", () => {
-    expect(resolveEditTarget({ namedPath: "a.ts", reason: "" }, [], []).kind).toBe("no-files");
+    expect(resolveEditTarget({ namedPath: "a.ts", reason: "" }, [], [], BUDGET).kind).toBe("no-files");
   });
 
   it("REFUSES when the file was fetched but not seen whole", () => {
@@ -145,7 +151,7 @@ describe("resolving a loosely-named target", () => {
     // budget clamped it. Everything looks ready except the one fact that decides it.
     const r = resolveEditTarget({ namedPath: "retry.ts", reason: "" }, fetched, [
       "src/routes/auth.ts",
-    ]);
+    ], BUDGET);
 
     expect(r).toEqual({ kind: "not-whole", path: "src/retry.ts" });
   });
@@ -182,7 +188,7 @@ describe("the refusals themselves", () => {
   });
 
   it("asks for the whole file back when the file is present in full", () => {
-    const note = editNoteFor("src/retry.ts");
+    const note = editNoteFor("src/retry.ts", "export const a = 1;");
 
     expect(note).toContain("src/retry.ts");
     expect(note).toMatch(/IN FULL/);
@@ -249,8 +255,9 @@ describe("the clamp signal from ContextManager", () => {
     const result = build([{ path: "src/huge.ts", content: huge }], 20_000);
     const resolution = resolveEditTarget(
       { namedPath: "huge.ts", reason: "" },
-      [{ path: "src/huge.ts" }],
-      result.repositoryFilesWhole
+      [{ path: "src/huge.ts", content: "export const a = 1;" }],
+      result.repositoryFilesWhole,
+      BUDGET
     );
 
     expect(resolution.kind).toBe("not-whole");

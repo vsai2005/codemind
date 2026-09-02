@@ -1,4 +1,6 @@
 import type { EditIntent } from "@/lib/ai/intent";
+import { estimateTokens, SAFETY_MARGIN_RATIO } from "@/lib/ai/context-manager";
+import { findTruncation } from "@/lib/artifacts/validate";
 
 /**
  * Resolving and refusing a single-file repository edit.
@@ -11,13 +13,17 @@ import type { EditIntent } from "@/lib/ai/intent";
  * builds from the result; this module owns only what the answer should be.
  */
 
+/** Line separator, built from its char code so no source escape can be mangled. */
+const NEWLINE = String.fromCharCode(10);
+
 /** Why an edit could not be attempted, or the path it will be attempted on. */
 export type EditResolution =
   | { kind: "ready"; path: string }
   | { kind: "no-files" }
   | { kind: "not-found"; named: string; available: string[] }
   | { kind: "ambiguous"; candidates: string[] }
-  | { kind: "not-whole"; path: string };
+  | { kind: "not-whole"; path: string }
+  | { kind: "too-large"; path: string; chars: number; needed: number; budget: number };
 
 /**
  * Resolve a loosely-named target to one fetched path.
@@ -34,8 +40,9 @@ export type EditResolution =
  */
 export function resolveEditTarget(
   edit: EditIntent,
-  fetched: Array<{ path: string }>,
-  whole: string[]
+  fetched: Array<{ path: string; content: string }>,
+  whole: string[],
+  outputBudget: number
 ): EditResolution {
   const paths = fetched.map((f) => f.path);
   if (paths.length === 0) return { kind: "no-files" };
@@ -63,6 +70,27 @@ export function resolveEditTarget(
 
   const path = candidates[0];
   if (!whole.includes(path)) return { kind: "not-whole", path };
+
+  /**
+   * SIZE IS CHECKED LAST, and only once one file is settled on: it is the only refusal
+   * that needs the file's contents, and asking "can the reply hold this?" about a file
+   * we have not identified yet would be answering the wrong question.
+   *
+   * Ordered AFTER wholeness deliberately. A file that was clamped is one we only half
+   * saw, and reporting its size as the reason would name a consequence instead of the
+   * cause.
+   */
+  const content = fetched.find((f) => f.path === path)?.content ?? "";
+  if (!fitsOutputBudget(content, outputBudget)) {
+    return {
+      kind: "too-large",
+      path,
+      chars: content.length,
+      needed: editOutputTokens(content),
+      budget: outputBudget,
+    };
+  }
+
   return { kind: "ready", path };
 }
 
@@ -73,13 +101,17 @@ export function resolveEditTarget(
  * and asks for the whole file back. The grounding and output-contract layers already
  * cover refusing on missing context and fencing code, so this adds neither.
  */
-export function editNoteFor(path: string): string {
+export function editNoteFor(path: string, content: string): string {
+  const fence = fenceFor(content);
   return (
     `The user is asking for a change to ${path}. That file appears above IN FULL — ` +
-    `every line of it, not an excerpt. Return the COMPLETE modified file in one fenced ` +
+    `every line of it, not an excerpt. Return the COMPLETE modified file in ONE fenced ` +
     `code block, not a fragment, not a diff, and not an ellipsis standing in for ` +
     `unchanged code. Say in one line what you changed and why before the block. If the ` +
-    `change would require editing a file other than ${path}, say so instead of guessing.`
+    `change would require editing a file other than ${path}, say so instead of guessing.\n` +
+    `Open and close that block with exactly ${fence.length} backticks (${fence}). This ` +
+    `file contains Markdown fences of its own inside doc comments, and a shorter ` +
+    `delimiter would be closed by one of them partway through the file.`
   );
 }
 
@@ -105,6 +137,16 @@ export function editRefusalText(resolution: EditResolution): string {
         `rewrite: ${resolution.candidates.map((p) => `\`${p}\``).join(", ")}. Which ` +
         "one should I change?"
       );
+    case "too-large":
+      return (
+        `I will not attempt an edit to \`${resolution.path}\` because I cannot return ` +
+        `it whole. That file is ${resolution.chars.toLocaleString("en-US")} characters, ` +
+        `which needs roughly ${resolution.needed.toLocaleString("en-US")} output tokens, ` +
+        `and this model's replies are capped at ${resolution.budget.toLocaleString("en-US")}. ` +
+        `Editing it anyway would hand you a file that stops partway through with nothing ` +
+        `marking where it ended. Ask for a change to one specific function instead, so the ` +
+        `reply does not have to restate the whole file.`
+      );
     case "not-whole":
       return (
         `\`${resolution.path}\` was too large to fit in this turn's context, so I only ` +
@@ -116,4 +158,114 @@ export function editRefusalText(resolution: EditResolution): string {
       // Unreachable: callers branch on kind !== "ready" before reaching here.
       return "";
   }
+}
+
+
+/**
+ * Output tokens a whole-file rewrite of `content` would cost.
+ *
+ * The model has to reproduce every line it was given, so the file's own size is the
+ * floor on the reply. Uses the SAME estimator the context budget uses, because two
+ * estimators disagreeing is how a precondition passes and the generation then fails.
+ */
+export function editOutputTokens(content: string): number {
+  return estimateTokens(content);
+}
+
+/**
+ * Can a whole-file rewrite of this file fit in the model's output budget?
+ *
+ * THE FAILURE THIS PREVENTS, measured on the live chat path. ky's source/core/Ky.ts is
+ * 40,428 chars and needs ~11,551 output tokens; effectiveOutputTokens is 8,192. The
+ * generation returned 966 of 1,211 lines, the fence never closed, and it stopped
+ * mid-statement inside a catch block. Nothing told the user — the chat path never ran
+ * a truncation check, so a file that silently lost 245 lines looked finished.
+ *
+ * The margin is context-manager's SAFETY_MARGIN_RATIO, imported rather than restated.
+ * That constant exists because estimateTokens is a heuristic that errs optimistic on
+ * dense code, which is exactly the direction that would let this precondition pass a
+ * file the provider then truncates.
+ */
+export function fitsOutputBudget(content: string, outputBudget: number): boolean {
+  const margin = Math.ceil(outputBudget * SAFETY_MARGIN_RATIO);
+  return editOutputTokens(content) <= outputBudget - margin;
+}
+
+/**
+ * The fence delimiter that can safely wrap this content.
+ *
+ * THE FAILURE THIS PREVENTS, also measured. ky's source/utils/merge.ts carries a
+ * Markdown fence inside a JSDoc @example (lines 35 and 47). Returned inside a three
+ * backtick fence, the example's own fence CLOSED the block early: the reply came back
+ * as two blocks with the example content leaking between them as prose. The file was
+ * complete — 331 lines against 330 — and unusable, because taking "the code block"
+ * gave either the first 35 lines or the last 297.
+ *
+ * CommonMark's rule: a fenced block ends at a run of the SAME character at least as
+ * long as the opener, so an opener longer than any run inside the content cannot be
+ * closed early. Counted by scanning rather than by regex, so no escaping subtlety sits
+ * between this and the thing it protects.
+ */
+export function fenceFor(content: string): string {
+  let longest = 0;
+  let run = 0;
+  for (const ch of content) {
+    if (ch === "`") {
+      run += 1;
+      if (run > longest) longest = run;
+    } else {
+      run = 0;
+    }
+  }
+  // Three is the Markdown minimum; anything longer must clear the longest inner run.
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
+/**
+ * Truncation found in a whole-file edit the model already streamed.
+ *
+ * THE BACKSTOP, and it is required even with the precondition in front of it: the
+ * estimator is a heuristic and will be wrong in both directions. Reuses
+ * `findTruncation` from the artifact validator directly — it takes two strings and
+ * returns a string, with no artifact types in its signature, so there is nothing to
+ * extract and no second implementation to drift.
+ */
+export function findEditTruncation(path: string, content: string): string | null {
+  return findTruncation(path, content);
+}
+
+/**
+ * Extract the fenced code block from a reply, tolerating a delimiter of any length.
+ *
+ * Deliberately takes the FIRST opening fence to the LAST closing one: a reply split by
+ * the merge.ts defect has content between blocks, and treating the whole span as the
+ * file is what lets the truncation check see the real end of the output.
+ */
+export function extractFencedBlock(reply: string): string | null {
+  const lines = reply.split(NEWLINE);
+  let open = -1;
+  let close = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trimStart().startsWith("```")) {
+      if (open === -1) open = i;
+      else close = i;
+    }
+  }
+  if (open === -1) return null;
+  const end = close === -1 ? lines.length : close;
+  return lines.slice(open + 1, end).join(NEWLINE);
+}
+
+/** What the user is told when a streamed edit turns out to be cut off. */
+export function truncationNotice(path: string, reason: string): string {
+  return (
+    `
+
+---
+
+**This edit is incomplete and must not be applied.** The reply for ` +
+    `\`${path}\` was cut off before the file ended: ${reason}. The model ran out of ` +
+    `output budget partway through. Ask for a change to one specific function instead, ` +
+    `so the reply does not have to restate the whole file.`
+  );
 }
