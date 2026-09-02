@@ -20,7 +20,13 @@ import {
   normalizeDocumentAttachment,
   type AllowedImageMimeType,
 } from "@/lib/attachments";
-import { detectArtifactIntent } from "@/lib/ai/intent";
+import { detectArtifactIntent, detectEditIntent } from "@/lib/ai/intent";
+import {
+  resolveEditTarget,
+  editNoteFor,
+  editRefusalText,
+  type EditResolution,
+} from "@/lib/ai/repo-edit";
 import { generateArtifact } from "@/lib/artifacts/generate";
 import {
   attemptFromReport,
@@ -31,6 +37,7 @@ import {
 import { createArtifactStreamResponse } from "@/lib/artifacts/stream";
 import { buildArtifactBytes } from "@/lib/artifacts/build";
 import { enforceRateLimit, acquireGenerationSlot, concurrentGenerationLimit } from "@/lib/rate-limit";
+import { formatStreamPart } from "ai";
 import { scrubForLog } from "@/lib/ai/failure-classification";
 import { GENERATION_SLOT_MAX_LIFETIME_MS } from "@/lib/ai/generation-window";
 import { releaseOnStreamEnd } from "@/lib/ai/stream-lifecycle";
@@ -744,7 +751,7 @@ export async function POST(req: Request): Promise<Response> {
       }
     }
 
-    const buildContext = (maxRecentTurns?: number) =>
+    const buildContext = (maxRecentTurns?: number, noteOverride?: string) =>
       ContextManager.buildContext(historicalMessages, activeUserMessage, existingSummary, {
         hasImage: Boolean(image),
         retrievalCandidates,
@@ -756,7 +763,7 @@ export async function POST(req: Request): Promise<Response> {
         projectInstructions,
         projectMemory,
         repositoryFiles,
-        repositoryNote,
+        repositoryNote: noteOverride ?? repositoryNote,
       });
 
     let context = buildContext();
@@ -774,6 +781,16 @@ export async function POST(req: Request): Promise<Response> {
     // Vision requests stay on the normal chat path so image reasoning is preserved.
     const intent = image ? null : detectArtifactIntent(userText);
 
+    /**
+     * Repository edit, and it is CHECKED ONLY WHERE THE ARTIFACT ROUTER DECLINED.
+     *
+     * That ordering is the disambiguation rule, not an implementation detail: "download
+     * the fixed auth.ts" is already `{ type: "file" }` and goes to the artifact pipeline
+     * exactly as before. Slice one deliberately does not handle the deliver-an-edit
+     * case, which would need an artifact type, a migration and a download path.
+     */
+    const editIntent = intent || image || !repository ? null : detectEditIntent(userText);
+
     // Planning stage. Runs before generation on a small, targeted slice of context —
     // the request plus assembled memory, never the full window. Returns null for
     // trivial asks or on any failure, in which case generation proceeds unplanned.
@@ -785,6 +802,46 @@ export async function POST(req: Request): Promise<Response> {
 
     // The plan augments the prompt; the user's original words are still sent verbatim.
     const plannedPrompt = plan ? `${promptText}${planToPromptBlock(plan)}` : promptText;
+
+    /**
+     * THE LOAD-BEARING BEHAVIOUR OF THIS SLICE.
+     *
+     * An edit is attempted only when the target file reached the model WHOLE. A model
+     * handed half a file rewrites it with complete confidence and returns something
+     * plausible, wrong, and silently incomplete — there is no signal in the output that
+     * says "I only saw the first 400 lines".
+     *
+     * The refusal is decided HERE, by the server, and it does not call the model at
+     * all. It is not a prompt instruction and not a warning appended to an answer: both
+     * of those degrade, and this one cannot. The grounding layer already tells the model
+     * to refuse on missing context and it usually will — "usually" is exactly the
+     * property this replaces.
+     */
+    if (editIntent) {
+      const resolution = resolveEditTarget(
+        editIntent,
+        repositoryFiles ?? [],
+        context.repositoryFilesWhole
+      );
+
+      if (resolution.kind !== "ready") {
+        return editRefusal(resolution, {
+          conversationId: activeConversationId,
+          originalRawContent,
+          userId,
+          provider: resolved.descriptor.provider,
+          model: resolved.descriptor.providerModelId,
+        });
+      }
+
+      /**
+       * Rebuilt so the note travels in the same contextBlocks the model already reads.
+       * buildContext is synchronous and does no I/O — the route already rebuilds it
+       * under context pressure below, so a second call is an established cost, not a
+       * new one.
+       */
+      context = buildContext(undefined, editNoteFor(resolution.path));
+    }
 
     if (intent) {
       const artifactResponse = handleArtifactRequest({
@@ -1433,6 +1490,56 @@ ${warningNote}`
  * Persist the user turn and the assistant's visible reply, plus any artifact.
  * `visibleText` is the only assistant content written to the database.
  */
+/**
+ * A refusal, written by the server and streamed as an ordinary assistant reply.
+ *
+ * NO MODEL CALL. That is the point: the decision not to edit is made from facts the
+ * server already has, so it cannot be argued out of by a model that would rather be
+ * helpful. It reuses the same data-stream wire format the client already parses, so
+ * there is no new UI component and no special case in the browser.
+ *
+ * Persisted like any other turn, with no usage — nothing was generated, and recording a
+ * zero would put a fictional generation into the token accounting.
+ */
+function editRefusal(
+  resolution: EditResolution,
+  turn: {
+    conversationId: string;
+    originalRawContent: string;
+    userId: string;
+    provider: string;
+    model: string;
+  }
+): Response {
+  const text = editRefusalText(resolution);
+
+  logger.info("Repository edit refused", {
+    conversationId: turn.conversationId,
+    reason: resolution.kind,
+  });
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      controller.enqueue(new TextEncoder().encode(formatStreamPart("text", text)));
+      controller.close();
+      // After the reply is on the wire, so a database problem cannot cost the user the
+      // answer — the same ordering the streaming path uses.
+      await persistTurn(
+        turn.conversationId,
+        turn.userId,
+        turn.originalRawContent,
+        text,
+        null,
+        { provider: turn.provider, model: turn.model }
+      );
+    },
+  });
+
+  return new Response(stream, {
+    headers: { "Content-Type": "text/plain; charset=utf-8", "x-vercel-ai-data-stream": "v1" },
+  });
+}
+
 async function persistTurn(
   conversationId: string,
   userId: string,

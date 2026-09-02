@@ -148,6 +148,77 @@ export function detectArtifactIntent(rawText: unknown): ArtifactIntent | null {
 }
 
 /**
+ * Verbs that mean "change code that already exists", as opposed to "write me new code".
+ *
+ * The distinction is the whole classifier. "write a debounce function" is generation
+ * and belongs to the artifact pipeline; "fix the debounce in utils.ts" is an edit
+ * against a file that is already there. Only the second needs the file in front of the
+ * model, and only the second can be silently wrong by editing something it half-saw.
+ */
+const EDIT_VERB =
+  /\b(fix|correct|repair|change|modify|update|edit|patch|refactor|rename|rewrite|adjust|tweak|improve|optimi[sz]e|simplify|clean up|handle|guard|harden)\b|\b(add|remove|delete|drop|replace|extract|inline|move)\b(?=[^.?!]*\b(?:to|from|in|into|within|inside|out of)\b)/;
+
+/**
+ * Evidence that the verb has a target IN THE REPOSITORY rather than in the abstract.
+ *
+ * A filename is the strong form. The weak form is a definite noun phrase — "the retry
+ * logic", "the auth middleware" — which is how people actually name a file they cannot
+ * remember the path of. Resolution of that phrase happens in the route against files
+ * actually fetched; this only decides that an edit was asked for.
+ */
+const EDIT_TARGET_PHRASE =
+  /\bthe\s+[\w-]+(?:\s+[\w-]+)?\s+(?:logic|function|handler|helper|method|class|module|component|middleware|route|hook|util(?:ity)?|parser|validator|check|guard|config)\b/;
+
+export interface EditIntent {
+  /** The filename the user named, when they named one. Null for a phrase-only target. */
+  namedPath: string | null;
+  /** Why this was classified as an edit. For logs and tests. */
+  reason: string;
+}
+
+/**
+ * Classify a message as a request to CHANGE an existing repository file.
+ *
+ * WHERE THIS SITS RELATIVE TO THE ARTIFACT ROUTER, and it is not a third branch of it:
+ * `detectArtifactIntent` decides "should the artifact pipeline answer instead of the
+ * chat model?", and a non-null answer means the chat model never runs. An edit is a
+ * CHAT answer — a fenced code block in the reply — so this is only ever consulted when
+ * that router has already declined. The route enforces that ordering; this function
+ * does not know about it.
+ *
+ * That ordering is also the disambiguation rule for "download the fixed auth.ts".
+ * DELIVERY plus a filename is already `{ type: "file" }`, so it goes to the artifact
+ * pipeline exactly as it does today and never reaches here. Slice one DELIBERATELY
+ * DOES NOT HANDLE the "edit it and hand me the file" case: producing a downloadable
+ * edit needs an artifact type, a schema migration and a download path, all of which
+ * are out of scope. The existing behaviour for those messages is unchanged rather
+ * than half-changed.
+ *
+ * Conservative in the same way as the artifact router: when in doubt it returns null
+ * and the turn is ordinary chat, which is what it was before this existed.
+ */
+export function detectEditIntent(rawText: unknown): EditIntent | null {
+  if (typeof rawText !== "string") return null;
+
+  const text = normalizeForIntent(rawText);
+  if (text.trim().length === 0) return null;
+
+  if (!EDIT_VERB.test(text)) return null;
+
+  const named = FILENAME_REF.exec(text);
+  if (named) return { namedPath: named[0], reason: "edit verb with a named file" };
+
+  if (EDIT_TARGET_PHRASE.test(text)) {
+    return { namedPath: null, reason: "edit verb with a described target" };
+  }
+
+  // A verb with nothing to aim at. "fix it" after an explanation is a real request,
+  // but resolving "it" needs conversation state this classifier does not see, and
+  // guessing a file to rewrite is the one failure this slice exists to prevent.
+  return null;
+}
+
+/**
  * Does this message mention files or downloads AT ALL — deliberately loose.
  *
  * WHY THIS IS NOT `detectArtifactIntent`

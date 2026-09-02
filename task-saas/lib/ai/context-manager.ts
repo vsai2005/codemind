@@ -406,6 +406,21 @@ export interface BuildContextResult {
    * Reused by the artifact pipeline so generation sees the same working context.
    */
   contextBlocks: string;
+  /**
+   * Repository files that reached the model WHOLE, by path.
+   *
+   * NOTHING DISTINGUISHED A CLAMPED FILE FROM A COMPLETE ONE BEFORE THIS. The loop
+   * below may render a file in full, clamp the first one when nothing else has fit, or
+   * break and omit the rest entirely — and all three produced the same `contextBlocks`
+   * string with no way for a caller to tell which had happened. For an explanation
+   * that is a quality issue; for an EDIT it is a correctness one, because a model handed
+   * half a file rewrites it confidently and returns something plausible, wrong and
+   * silently incomplete.
+   *
+   * A path appears here only if its ENTIRE content was rendered. Clamped and omitted
+   * files are absent, and absence is the signal callers act on.
+   */
+  repositoryFilesWhole: string[];
   pressure: ContextPressure;
   retrievedMessageIds: string[];
 }
@@ -562,6 +577,8 @@ export class ContextManager {
     budget -= queryTokens;
 
     let contextBlocks = "";
+    /** Paths rendered in full this turn. See BuildContextResult.repositoryFilesWhole. */
+    const repositoryFilesWhole: string[] = [];
 
     // --- 2b. Project workspace context -------------------------------------------
     // Placed ahead of the summary and history so a busy project cannot push the
@@ -623,10 +640,22 @@ Durable facts about this project:
     // its own, where the alternative is showing nothing of it.
     // A failure notice with no files. Deliberately its own branch: it must render when
     // there is nothing to render beside it.
-    if (options.repositoryNote && (!options.repositoryFiles || options.repositoryFiles.length === 0)) {
+    if (options.repositoryNote) {
+      /**
+       * One field, two headers. The note used to render ONLY when there were no files,
+       * because "unavailable" was the only thing a caller ever had to say. An edit turn
+       * needs to say something when the file IS present — that the whole file is in
+       * view and a whole file is wanted back — and that is the same kind of per-turn
+       * repository instruction, so it travels the same way rather than growing a second
+       * channel beside it.
+       */
+      const header =
+        !options.repositoryFiles || options.repositoryFiles.length === 0
+          ? "--- REPOSITORY CONTEXT UNAVAILABLE ---"
+          : "--- REPOSITORY TURN NOTE ---";
       const notice = `
 
---- REPOSITORY CONTEXT UNAVAILABLE ---
+${header}
 ${options.repositoryNote}
 `;
       if (estimateTokens(notice) <= budget) {
@@ -656,6 +685,10 @@ ${file.content}`;
 
         if (used + cost <= allowance) {
           rendered.push(block);
+          // Recorded ONLY on this branch — the one where the whole block fit. The
+          // clamp below and the `break` after it both leave the path absent, which is
+          // what makes absence trustworthy.
+          repositoryFilesWhole.push(file.path);
           used += cost;
           continue;
         }
@@ -867,6 +900,7 @@ ${file.content}`;
       droppedMessagesContent,
       systemPrompt,
       contextBlocks: contextBlocks.trim(),
+      repositoryFilesWhole,
       pressure: { used, total: totalBudget, ratio, level: pressureLevel(ratio) },
       retrievedMessageIds,
     };
