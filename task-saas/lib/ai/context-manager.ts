@@ -85,6 +85,79 @@ export { getContextTokenLimit, getOutputTokenLimit };
 // ---------------------------------------------------------------------------
 
 /**
+ * Characters per token, by content type. THE CANONICAL RATIOS — every token-cost
+ * decision in the codebase resolves to a number in this object.
+ *
+ * They lived in two places until 2026-09-02 and had already drifted: selection.ts
+ * carried its own 3.0 while this module carried 3.2, describing the same physical
+ * quantity for the same model. Worse, selection's number was not chosen at all — it
+ * fell out of the encoded-content clamp below firing on a synthetic placeholder. A
+ * calibration that touched one and not the other would have moved file ranking
+ * silently, which is exactly what happened.
+ *
+ * Calibrated against the provider on 2026-09-02; see estimateTokens for the samples
+ * and the measured ratios each of these sits below.
+ */
+export const CHARS_PER_TOKEN = {
+  /** Minified JSON, lockfiles, dense symbol soup. Measured 2.55. */
+  dense: 2.5,
+  /** Typical TS/TSX/JSON and markdown. Measured 3.25 to 3.95. */
+  source: 3.2,
+  /** Code carrying prose comments. UNMEASURED — no sample landed in this band. */
+  commented: 3.5,
+  /** Prose. Measured 5.56. */
+  prose: 5.0,
+  /** Base64 and hashes, which tokenize far worse than their punctuation suggests. */
+  encoded: 3.0,
+} as const;
+
+/**
+ * An unbroken alphanumeric run this long means encoded content, not source.
+ *
+ * NAMED because it was an unexplained literal that turned out to be load-bearing for
+ * file pricing. Audited 2026-09-02 across every indexed file in both repositories:
+ *
+ *   real indexed source files triggering it        0 of 62
+ *   ky package.json / readme / license / tsconfig  longest run 26
+ *   longest realistic camelCase identifier         50
+ *   base64 blob                                    184  <- fires, correctly
+ *   sha256 hash                                     64  <- fires, correctly
+ *
+ * So it discriminates cleanly today, with the nearest ordinary-source shape at 50.
+ * Note that it does NOT catch minified bundles despite an earlier comment saying so:
+ * minified JS keeps punctuation between tokens and scores a longest run of 8. The
+ * clamp catches ENCODED content, not compressed content.
+ */
+export const ENCODED_RUN_THRESHOLD = 60;
+
+/**
+ * How much more pessimistically a file is priced when only its SIZE is known.
+ *
+ * Selection ranks candidates from stored rows without fetching them, so it has a byte
+ * count and no content — none of the signals the bucket logic reads. It therefore
+ * charges more per byte than content pricing would: 3.2 x 0.9375 = 3.0 chars/token
+ * exactly, which is also below the 3.25 minimum measured for real TypeScript.
+ *
+ * THE DIRECTION IS DELIBERATE. Under-charging gets a file fetched and then dropped by
+ * the context packer, spending a GitHub request for nothing. Over-charging only leaves
+ * a little headroom unused.
+ *
+ * Derived from CHARS_PER_TOKEN.source rather than written as its own literal, so a
+ * future calibration of the source ratio moves byte pricing with it by construction —
+ * which is the whole reason these numbers now live together.
+ */
+export const SIZE_ONLY_PESSIMISM = 0.9375;
+
+/**
+ * Token cost of a file known only by its byte size. Bytes map 1:1 to characters for
+ * source. Never zero: a file that costs nothing would always "fit", so an empty or
+ * unreadable row would be selected ahead of real candidates.
+ */
+export function estimateTokensFromBytes(bytes: number): number {
+  return Math.ceil(Math.max(1, bytes) / (CHARS_PER_TOKEN.source * SIZE_ONLY_PESSIMISM));
+}
+
+/**
  * Content-aware token estimate. Still an estimate — there is no Nemotron tokenizer
  * in this codebase and this function must never be presented as exact.
  *
@@ -155,18 +228,20 @@ export function estimateTokens(text: string): number {
 
   let divisor: number;
   if (punctuationRatio > 0.2) {
-    divisor = 2.5; // minified JSON, lockfiles, dense symbol soup — measured 2.55
+    divisor = CHARS_PER_TOKEN.dense;
   } else if (punctuationRatio > 0.12) {
-    divisor = 3.2; // typical TS/TSX/JSON and markdown — measured 3.25 to 3.95
+    divisor = CHARS_PER_TOKEN.source;
   } else if (punctuationRatio > 0.06) {
-    divisor = 3.5; // code with prose comments — UNMEASURED, left as it was
+    divisor = CHARS_PER_TOKEN.commented;
   } else {
-    divisor = 5.0; // prose — measured 5.56
+    divisor = CHARS_PER_TOKEN.prose;
   }
 
-  // Long unbroken alphanumeric runs (base64, hashes, minified bundles) tokenize far
-  // worse than their punctuation density suggests.
-  if (longestRun > 60 && divisor > 3.0) divisor = 3.0;
+  // Encoded content — base64, hashes — tokenizes far worse than its punctuation
+  // density suggests. See ENCODED_RUN_THRESHOLD for what does and does not trip this.
+  if (longestRun > ENCODED_RUN_THRESHOLD && divisor > CHARS_PER_TOKEN.encoded) {
+    divisor = CHARS_PER_TOKEN.encoded;
+  }
 
   return Math.ceil(length / divisor);
 }

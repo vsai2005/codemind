@@ -1,4 +1,4 @@
-import { identifierWords, queryTerms } from "@/lib/ai/context-manager";
+import { estimateTokensFromBytes, identifierWords, queryTerms } from "@/lib/ai/context-manager";
 
 /**
  * Choosing which files a question needs, from the index alone.
@@ -576,40 +576,6 @@ export function expandAlongEdges(
 }
 
 /**
- * Characters per token for source priced from its SIZE alone.
- *
- * THE ACCIDENT THIS REPLACES. Pricing used to call the content-aware estimator on
- * `"x".repeat(file.size)` — a synthetic placeholder standing in for the real bytes.
- * That string has no punctuation at all, so it classified as PROSE, the most generous
- * bucket. What saved it was an unrelated guard: estimateTokens clamps the divisor to
- * 3.0 when it sees an alphanumeric run longer than 60 characters, a rule written for
- * base64 and minified bundles. Every file over 60 bytes was therefore priced at 3.0 by
- * a heuristic aimed at something else entirely, and a file UNDER 60 bytes escaped the
- * clamp and was priced as prose.
- *
- * So the number was right for the wrong reason, and tuning the base64 rule — or the
- * prose divisor, as the 2026-09-02 calibration did — moved file ranking silently. It
- * also built a string up to MAX_FILE_BYTES long for every candidate, purely to measure
- * it, on a path whose whole purpose is to rank without spending anything.
- *
- * 3.0 keeps the number every file over 60 bytes already had, so ranking does not move.
- * It sits below the 3.25 minimum measured for real TypeScript against the provider,
- * which is the pessimistic direction this function wants: under-charging a file gets it
- * fetched and then dropped by the context packer, spending a GitHub request for nothing.
- */
-const SOURCE_CHARS_PER_TOKEN = 3.0;
-
-/**
- * Token cost of a file of `bytes` bytes. Bytes map 1:1 to characters for source.
- *
- * Never zero: a file that costs nothing would always "fit", and an empty or unreadable
- * row would be selected ahead of real candidates.
- */
-function projectedTokens(bytes: number): number {
-  return Math.ceil(Math.max(1, bytes) / SOURCE_CHARS_PER_TOKEN);
-}
-
-/**
  * Take the highest-scoring files that fit a token allowance.
  *
  * Budgeted from the stored byte size rather than by fetching and measuring, so no
@@ -630,7 +596,7 @@ export function selectWithinBudget(
 
   for (const file of scored) {
     if (selected.length >= maxFiles) break;
-    const projected = projectedTokens(file.size);
+    const projected = estimateTokensFromBytes(file.size);
     if (used + projected > allowanceTokens) continue;
     used += projected;
     selected.push(file);
