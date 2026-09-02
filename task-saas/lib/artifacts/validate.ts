@@ -1,4 +1,5 @@
 import { validateArtifactFilename, validateArtifactPath } from "./paths";
+import { maskNonCode } from "@/lib/repo/mask-code";
 import {
   ARTIFACT_LIMITS,
   utf8Bytes,
@@ -129,52 +130,6 @@ const DANGLING_RE = /(?:[=+\-*/%&|^,:<([{]|=>|&&|\|\||\?\.|\bconst\b|\blet\b|\br
  */
 const LEGAL_TRAILING_RE = /\*\/$/;
 
-/**
- * Remove string literals and comments so brace counting is not thrown off by
- * braces that appear inside strings or comments.
- */
-function stripLiteralsAndComments(code: string): string {
-  let out = "";
-  let i = 0;
-  const n = code.length;
-
-  while (i < n) {
-    const ch = code[i];
-    const next = code[i + 1];
-
-    if (ch === "/" && next === "/") {
-      while (i < n && code[i] !== "\n") i++;
-      continue;
-    }
-    if (ch === "/" && next === "*") {
-      i += 2;
-      while (i < n && !(code[i] === "*" && code[i + 1] === "/")) i++;
-      i += 2;
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === "`") {
-      const quote = ch;
-      i++;
-      while (i < n) {
-        if (code[i] === "\\") {
-          i += 2;
-          continue;
-        }
-        if (code[i] === quote) {
-          i++;
-          break;
-        }
-        i++;
-      }
-      continue;
-    }
-
-    out += ch;
-    i++;
-  }
-
-  return out;
-}
 
 /**
  * Detect a file whose content stops mid-way. Returns a reason or null.
@@ -208,7 +163,20 @@ export function findTruncation(filePath: string, content: string): string | null
       return `"${filePath}" ends mid-statement ("${lastLine.slice(0, 40)}")`;
     }
 
-    const stripped = stripLiteralsAndComments(content);
+    /**
+     * MASKED WITH THE REPO SCANNER'S MASKER, not a local one.
+     *
+     * The local stripper had no notion of a regex literal, so `.replace(/"/g, "&quot;")`
+     * opened a string at the quote INSIDE the regex that never closed, swallowing the
+     * rest of the file along with its final brace. Measured on the 42-case run: two
+     * complete, balanced files rejected as having one unclosed brace, in both arms.
+     *
+     * mask-code.ts already had this right and says why in its own comment — a regex may
+     * contain quotes and comment markers, and treating it as code lets those open a
+     * bogus string. Keeping a second, weaker implementation here is what let the two
+     * disagree; there is now one.
+     */
+    const stripped = maskNonCode(content);
     const pairs: Array<[string, string, string]> = [
       ["{", "}", "brace"],
       ["[", "]", "bracket"],
