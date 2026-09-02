@@ -1,5 +1,10 @@
 import { formatStreamPart, parseStreamPart } from "ai";
-import { extractFencedBlock, findEditTruncation, truncationNotice } from "@/lib/ai/repo-edit";
+import {
+  extractFencedBlock,
+  findEditTruncation,
+  truncationNotice,
+  editTruncationAnnotation,
+} from "@/lib/ai/repo-edit";
 import { logger } from "@/lib/logger";
 
 /**
@@ -55,6 +60,18 @@ export function guardEditTruncation(
             reason,
             replyChars: text.length,
           });
+          /**
+           * The structured marker goes FIRST, so a consumer that stops reading at the
+           * first annotation still sees it, and so it is present even if the text part
+           * below is dropped by a client that renders prose selectively.
+           */
+          controller.enqueue(
+            encoder.encode(
+              formatStreamPart("message_annotations", [
+                editTruncationAnnotation(context.path, reason) as never,
+              ])
+            )
+          );
           controller.enqueue(
             encoder.encode(formatStreamPart("text", truncationNotice(context.path, reason)))
           );

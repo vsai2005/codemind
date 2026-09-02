@@ -1,15 +1,19 @@
 import { describe, it, expect } from "vitest";
 import {
   fenceFor,
+  fenceTokens,
   fitsOutputBudget,
+  EDIT_REPLY_OVERHEAD_TOKENS,
   editOutputTokens,
   extractFencedBlock,
   findEditTruncation,
   resolveEditTarget,
   editRefusalText,
   editNoteFor,
+  editTruncationAnnotation,
+  readEditTruncation,
 } from "@/lib/ai/repo-edit";
-import { estimateTokens, SAFETY_MARGIN_RATIO } from "@/lib/ai/context-manager";
+import { estimateTokens } from "@/lib/ai/context-manager";
 
 /**
  * The two structural failures found by probing the live chat path, and their fixes.
@@ -102,16 +106,91 @@ describe("the size precondition", () => {
     expect(editOutputTokens(huge)).toBe(estimateTokens(huge));
   });
 
-  it("applies the existing safety margin rather than a fresh constant", () => {
-    // BY CONSTRUCTION: a file sized into the margin itself. It is under the raw budget
-    // and over budget-minus-margin, so it passes a naive check and fails the real one.
+  it("reserves room for the reply's prose, not just the file", () => {
+    /**
+     * BY CONSTRUCTION, and this is the fixture the old check failed on. The file is
+     * sized to sit INSIDE the overhead reserve: comfortably under the raw budget, and
+     * over budget-minus-reserve. Comparing the file alone against the budget passes it;
+     * the generation then truncates on the preamble. Measured prose overhead reached
+     * 217 tokens on a real reply, so this gap is not hypothetical.
+     */
     const budget = 10_000;
-    const margin = Math.ceil(budget * SAFETY_MARGIN_RATIO);
     let content = "const x = 1;\n";
-    while (estimateTokens(content) <= budget - margin) content += "const x = 1;\n";
+    while (estimateTokens(content) <= budget - EDIT_REPLY_OVERHEAD_TOKENS) {
+      content += "const x = 1;\n";
+    }
 
-    expect(estimateTokens(content)).toBeGreaterThan(budget - margin);
     expect(estimateTokens(content)).toBeLessThanOrEqual(budget);
+    expect(estimateTokens(content)).toBeGreaterThan(budget - EDIT_REPLY_OVERHEAD_TOKENS);
+    expect(fitsOutputBudget(content, budget)).toBe(false);
+  });
+
+  it("subtracts the fence delimiters too", () => {
+    // A file carrying its own fences needs a longer delimiter, and that costs tokens
+    // the file estimate does not include.
+    const withFences = "```\nexample\n```\nexport const a = 1;\n";
+
+    expect(fenceTokens(withFences)).toBeGreaterThan(0);
+    expect(fenceTokens(withFences)).toBeGreaterThanOrEqual(fenceTokens("plain content"));
+  });
+
+  it("leaves room for both the reserve and the fence", () => {
+    // The full arithmetic: file + reserve + fence must fit, not file alone.
+    const budget = 10_000;
+    let content = "const x = 1;\n";
+    while (
+      estimateTokens(content) <=
+      budget - EDIT_REPLY_OVERHEAD_TOKENS - fenceTokens(content) - 5
+    ) {
+      content += "const x = 1;\n";
+    }
+
+    expect(fitsOutputBudget(content, budget)).toBe(true);
+    // One more push past the boundary flips it.
+    while (fitsOutputBudget(content, budget)) content += "const x = 1;\n";
+    expect(fitsOutputBudget(content, budget)).toBe(false);
+  });
+
+  it("reserves ENOUGH — a literal-sized file, so halving the reserve is caught", () => {
+    /**
+     * SHARPENED AFTER MUTATION TESTING. The test above sizes its fixture from
+     * EDIT_REPLY_OVERHEAD_TOKENS, so halving the constant moved the fixture with it and
+     * the mutant survived — the same self-referential mistake that hid a real bug
+     * earlier in this codebase.
+     *
+     * This one uses LITERAL numbers. At a 10,000 budget a file of ~9,700 tokens sits
+     * between 9,488 (budget - 512) and 9,744 (budget - 256): refused at the real
+     * reserve, wrongly accepted at half of it.
+     */
+    const budget = 10_000;
+    let content = "const x = 1;\n";
+    while (estimateTokens(content) < 9_700) content += "const x = 1;\n";
+
+    expect(estimateTokens(content)).toBeGreaterThan(9_488);
+    expect(estimateTokens(content)).toBeLessThan(9_744);
+    expect(fitsOutputBudget(content, budget)).toBe(false);
+  });
+
+  it("subtracts the fence cost from the available budget, not just from prose", () => {
+    /**
+     * ALSO SHARPENED. Asserting fenceTokens() in isolation left "ignore the fence cost"
+     * alive, because nothing checked that fitsOutputBudget actually spends it. This
+     * fixture sits in the few tokens the fence occupies: it fits if the fence is free
+     * and does not if it is charged for.
+     */
+    const budget = 10_000;
+    let content = "const x = 1;\n";
+    // Grow to exactly the boundary that ignoring the fence would allow.
+    while (estimateTokens(content) <= budget - EDIT_REPLY_OVERHEAD_TOKENS - 1) {
+      content += "const x = 1;\n";
+    }
+    while (estimateTokens(content) > budget - EDIT_REPLY_OVERHEAD_TOKENS) {
+      content = content.slice(0, content.length - "const x = 1;\n".length);
+    }
+
+    expect(estimateTokens(content)).toBeLessThanOrEqual(budget - EDIT_REPLY_OVERHEAD_TOKENS);
+    expect(fenceTokens(content)).toBeGreaterThan(0);
+    // Fits with the fence free, refused once it is charged.
     expect(fitsOutputBudget(content, budget)).toBe(false);
   });
 
@@ -230,5 +309,48 @@ describe("the note sent to the model", () => {
     const note = editNoteFor("src/retry.ts", "export const a = 1;");
 
     expect(note).toContain("3 backticks");
+  });
+});
+
+describe("the structured truncation signal", () => {
+  it("round-trips through the annotation shape", () => {
+    const annotation = editTruncationAnnotation("src/a.ts", "has 4 unclosed brace(s)");
+    const signal = readEditTruncation([annotation]);
+
+    expect(signal).toEqual({
+      path: "src/a.ts",
+      reason: "has 4 unclosed brace(s)",
+      usable: false,
+    });
+  });
+
+  it("carries usable:false so a consumer branches on a fact, not an inference", () => {
+    const signal = readEditTruncation([editTruncationAnnotation("a.ts", "cut off")]);
+
+    expect(signal?.usable).toBe(false);
+  });
+
+  it("finds the marker among unrelated annotations", () => {
+    // Real replies carry codemindPlan and codemindArtifacts on the same channel.
+    const signal = readEditTruncation([
+      { codemindPlan: { steps: [] } },
+      editTruncationAnnotation("src/b.ts", "unclosed"),
+      { codemindArtifacts: [] },
+    ]);
+
+    expect(signal?.path).toBe("src/b.ts");
+  });
+
+  it("returns null for a clean reply, so the absent case is unambiguous", () => {
+    expect(readEditTruncation([{ codemindPlan: null }])).toBeNull();
+    expect(readEditTruncation([])).toBeNull();
+    expect(readEditTruncation(undefined)).toBeNull();
+    expect(readEditTruncation("not an array")).toBeNull();
+  });
+
+  it("rejects a malformed marker rather than reporting a half-filled one", () => {
+    // A consumer acting on { path: undefined } is worse than one told nothing.
+    expect(readEditTruncation([{ codemindEditTruncated: { path: "a.ts" } }])).toBeNull();
+    expect(readEditTruncation([{ codemindEditTruncated: "truncated" }])).toBeNull();
   });
 });

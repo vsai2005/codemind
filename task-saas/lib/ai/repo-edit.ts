@@ -1,5 +1,5 @@
 import type { EditIntent } from "@/lib/ai/intent";
-import { estimateTokens, SAFETY_MARGIN_RATIO } from "@/lib/ai/context-manager";
+import { estimateTokens } from "@/lib/ai/context-manager";
 import { findTruncation } from "@/lib/artifacts/validate";
 
 /**
@@ -186,9 +186,51 @@ export function editOutputTokens(content: string): number {
  * dense code, which is exactly the direction that would let this precondition pass a
  * file the provider then truncates.
  */
+/**
+ * Tokens reserved for everything in the reply that is NOT the file.
+ *
+ * MEASURED, not guessed. Across the six whole-file edit replies captured while probing
+ * this path — four complete, one truncated, one split by the fence defect — the prose
+ * outside the code block cost:
+ *
+ *   ms fortnight unit          193 tokens
+ *   ms unit-ladder refactor    217 tokens
+ *   ms throw-on-unparseable    142 tokens
+ *   ms premise corrected        60 tokens
+ *   ky merge.ts                 45 tokens   (understated: the split reply's leaked
+ *                                            prose falls inside the extracted span)
+ *   ky Ky.ts                    90 tokens   (understated: reply was cut off early)
+ *
+ * Max on a complete reply: 217. The reserve is 512 — roughly 2.4x that — and the
+ * headroom is deliberate, because the sample is small (n=6, one model, one file per
+ * prompt) and every prompt asked for a terse change. A model that chooses to explain
+ * its reasoning at length, or lists the edits it made before the block, spends more
+ * than any of these did and nothing caps it.
+ *
+ * WHY NOT SAFETY_MARGIN_RATIO, which this function used before: that constant is 2% of
+ * the CONTEXT window, sized for estimator drift when packing a prompt. At an 8,192
+ * reply budget it yields 164 tokens — below the maximum prose overhead already
+ * observed, and scaled to the wrong quantity entirely. A file estimated at 8,000
+ * tokens passed that check and then truncated on the preamble, which is precisely the
+ * failure the backstop was left to catch.
+ */
+export const EDIT_REPLY_OVERHEAD_TOKENS = 512;
+
+/**
+ * Tokens spent on the fence delimiters themselves.
+ *
+ * Small, but not zero, and it grows with the delimiter: a file carrying its own
+ * Markdown fences needs a longer opener, and a language tag and two newlines ride
+ * along with it. Counted rather than assumed so the arithmetic below is complete.
+ */
+export function fenceTokens(content: string): number {
+  const fence = fenceFor(content);
+  return estimateTokens(`${fence}typescript\n\n${fence}`);
+}
+
 export function fitsOutputBudget(content: string, outputBudget: number): boolean {
-  const margin = Math.ceil(outputBudget * SAFETY_MARGIN_RATIO);
-  return editOutputTokens(content) <= outputBudget - margin;
+  const available = outputBudget - EDIT_REPLY_OVERHEAD_TOKENS - fenceTokens(content);
+  return editOutputTokens(content) <= available;
 }
 
 /**
@@ -254,6 +296,54 @@ export function extractFencedBlock(reply: string): string | null {
   if (open === -1) return null;
   const end = close === -1 ? lines.length : close;
   return lines.slice(open + 1, end).join(NEWLINE);
+}
+
+/**
+ * Machine-readable truncation marker, carried on the reply's annotations.
+ *
+ * WHY A FIELD AND NOT ONLY PROSE. The appended notice works for a person reading chat
+ * and is invisible to anything else. A CLI, an apply step, or a later agent turn reads
+ * the reply text, finds a fenced code block, and has no way to know the file inside it
+ * stops mid-function — the prose is just more text above the block. Both consumers
+ * exist, so both signals ship: the notice for the reader, this for the caller.
+ *
+ * Rides the SAME message_annotations channel codemindPlan and codemindArtifacts
+ * already use, so nothing new is invented and a reload path that re-attaches
+ * annotations carries it without further work.
+ */
+export interface EditTruncationSignal {
+  path: string;
+  reason: string;
+  /** Always false. Present so a consumer can branch on the fact, not infer it. */
+  usable: false;
+}
+
+/** The annotation payload, in the shape the stream and the client both expect. */
+export function editTruncationAnnotation(path: string, reason: string): {
+  codemindEditTruncated: EditTruncationSignal;
+} {
+  return { codemindEditTruncated: { path, reason, usable: false } };
+}
+
+/**
+ * Read the marker back off a reply's annotations. THE ONE ACCESSOR — a consumer that
+ * pulls a code block out of an edit reply calls this first, and treats a non-null
+ * result as "do not use this content".
+ */
+export function readEditTruncation(annotations: unknown): EditTruncationSignal | null {
+  if (!Array.isArray(annotations)) return null;
+  for (const entry of annotations) {
+    if (entry && typeof entry === "object" && "codemindEditTruncated" in entry) {
+      const value = (entry as Record<string, unknown>).codemindEditTruncated;
+      if (value && typeof value === "object") {
+        const signal = value as Partial<EditTruncationSignal>;
+        if (typeof signal.path === "string" && typeof signal.reason === "string") {
+          return { path: signal.path, reason: signal.reason, usable: false };
+        }
+      }
+    }
+  }
+  return null;
 }
 
 /** What the user is told when a streamed edit turns out to be cut off. */

@@ -40,7 +40,7 @@ const SYSTEM_PROMPT_RESERVE = 520;
  * Held back so an estimator miss cannot push the request past the provider ceiling.
  * The estimator is a heuristic (see estimateTokens) and errs optimistic on dense code.
  */
-export const SAFETY_MARGIN_RATIO = 0.02;
+const SAFETY_MARGIN_RATIO = 0.02;
 
 /**
  * Images consume provider-side tokens that a text estimator cannot see, so a
