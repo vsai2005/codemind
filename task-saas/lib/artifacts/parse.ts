@@ -40,7 +40,44 @@ export interface ArtifactParseResult {
 
 const SUMMARY_RE = /<codemind_summary>([\s\S]*?)<\/codemind_summary>/i;
 const ARTIFACT_OPEN_RE = /<codemind_artifact\s+type="([^"]*)"\s+name="([^"]*)"\s*>/i;
-const ARTIFACT_CLOSE = "</codemind_artifact>";
+/**
+ * Locate the closing sentinel, case-insensitively, returning offsets into the ORIGINAL
+ * string.
+ *
+ * THE BUG THIS REPLACES, and it shipped because it looks obviously correct:
+ *
+ *   const closeIndex = text.toLowerCase().indexOf("</codemind_artifact>", bodyStart);
+ *   const body = text.slice(bodyStart, closeIndex);
+ *
+ * The index comes from the lowercased string and the slice is taken from the original.
+ * That is only safe while `toLowerCase()` preserves length, and it does not: U+0130
+ * (LATIN CAPITAL LETTER I WITH DOT ABOVE) lowercases to TWO code units, `i` + U+0307.
+ * Every character after it shifts, so `closeIndex` points one place too far and the
+ * slice swallows the leading characters of the sentinel.
+ *
+ * Measured on real generations: 0 drift in a passing run, +1 in one whose Unicode
+ * transliteration map contained `İ`, which put a bare `<` on the end of the file and
+ * tripped the truncation checker. That check was right about what it was handed.
+ *
+ * A REGEX RATHER THAN A HAND-ROLLED CASE-FOLDED SCAN. `exec` reports `index` and the
+ * matched text as offsets into the string actually searched, so there is no second
+ * string that can disagree with the source — the class of bug is removed rather than
+ * worked around. A manual scan would have to re-implement case folding, which is the
+ * part that was subtly wrong to begin with.
+ *
+ * The RegExp is built per call rather than shared: a `g` regex carries mutable
+ * `lastIndex`, and a module-level one would make two interleaved parses corrupt each
+ * other's position. Allocation is nothing next to that.
+ */
+function findArtifactClose(text: string, from: number): { start: number; end: number } | null {
+  const re = /<\/codemind_artifact\s*>/gi;
+  re.lastIndex = from;
+  const match = re.exec(text);
+  if (!match) return null;
+  // `end` from the matched text, not a fixed literal length: the pattern tolerates
+  // whitespace before the ">", so the two can legitimately differ.
+  return { start: match.index, end: match.index + match[0].length };
+}
 const FILE_RE = /<file\s+path="([^"]*)"\s*>([\s\S]*?)<\/file>/gi;
 const FILE_OPEN_RE = /<file\s+path="[^"]*"\s*>/gi;
 
@@ -73,13 +110,13 @@ export function parseArtifactOutput(rawOutput: string): ArtifactParseResult {
   }
 
   const bodyStart = openMatch.index + openMatch[0].length;
-  const closeIndex = text.toLowerCase().indexOf(ARTIFACT_CLOSE, bodyStart);
-  if (closeIndex === -1) {
+  const close = findArtifactClose(text, bodyStart);
+  if (!close) {
     errors.push("the artifact block was never closed (generation stopped early)");
     return { summary, artifact: null, errors };
   }
 
-  const body = text.slice(bodyStart, closeIndex);
+  const body = text.slice(bodyStart, close.start);
 
   if (declaredType === "pdf") {
     return {
@@ -162,7 +199,6 @@ export function parseAllArtifactBlocks(content: string): {
   const blocks: LocatedArtifact[] = [];
   const errors: string[] = [];
   let unterminatedStart: number | null = null;
-  const lower = content.toLowerCase();
 
   ARTIFACT_OPEN_GLOBAL_RE.lastIndex = 0;
   let open: RegExpExecArray | null;
@@ -189,16 +225,18 @@ export function parseAllArtifactBlocks(content: string): {
     }
 
     const bodyStart = start + open[0].length;
-    const closeIndex = lower.indexOf(ARTIFACT_CLOSE, bodyStart);
-    if (closeIndex === -1) {
+    const close = findArtifactClose(content, bodyStart);
+    if (!close) {
       errors.push(`artifact "${declaredName}" was never closed`);
       // Anything after this point is inside the unterminated block.
       unterminatedStart = start;
       break;
     }
 
-    const body = content.slice(bodyStart, closeIndex);
-    const end = closeIndex + ARTIFACT_CLOSE.length;
+    const body = content.slice(bodyStart, close.start);
+    // Drift here was worse than at the single-artifact site: `end` is where the scan
+    // resumes, so a shifted offset mis-sliced the NEXT block as well as this one.
+    const end = close.end;
 
     if (declaredType === "pdf") {
       blocks.push({
