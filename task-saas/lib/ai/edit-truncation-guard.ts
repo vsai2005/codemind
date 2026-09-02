@@ -1,7 +1,6 @@
 import { formatStreamPart, parseStreamPart } from "ai";
 import {
-  extractFencedBlock,
-  findEditTruncation,
+  editTruncationFor,
   truncationNotice,
   editTruncationAnnotation,
 } from "@/lib/ai/repo-edit";
@@ -50,8 +49,8 @@ export function guardEditTruncation(
       const { done, value } = await reader.read();
 
       if (done) {
-        const block = extractFencedBlock(text);
-        const reason = block === null ? null : findEditTruncation(context.path, block);
+        const signal = editTruncationFor(context.path, text);
+        const reason = signal?.reason ?? null;
 
         if (reason) {
           logger.warn("Edit reply was truncated", {

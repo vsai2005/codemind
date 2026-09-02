@@ -25,6 +25,7 @@ import {
   resolveEditTarget,
   editNoteFor,
   editRefusalText,
+  editTruncationFor,
   type EditResolution,
 } from "@/lib/ai/repo-edit";
 import { generateArtifact } from "@/lib/artifacts/generate";
@@ -967,6 +968,11 @@ export async function POST(req: Request): Promise<Response> {
           try {
             const promptTokens = toTokenCount(usage?.promptTokens);
             const completionTokens = toTokenCount(usage?.completionTokens);
+            // Computed here as well as in the stream guard: this call site owns the
+            // durable record, that one owns the live annotation.
+            const editTruncationSignal = editTargetPath
+              ? editTruncationFor(editTargetPath, text)
+              : null;
 
             // One transaction: an assistant reply with no updatedAt bump sorts to the
             // bottom of the sidebar, and a bump with no message under it shows an
@@ -984,6 +990,15 @@ export async function POST(req: Request): Promise<Response> {
                   model: effectiveProviderModelId,
                   // Persisted so the plan is still there after a reload.
                   plan: plan ? (plan as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
+                  /**
+                   * Same reason as `plan`: the live stream annotates a truncated edit,
+                   * and without a stored copy a reload shows the cut-off code block with
+                   * no warning — worse than never warning, because the first render
+                   * already told the user it was complete.
+                   */
+                  editTruncation: editTruncationSignal
+                    ? (editTruncationSignal as unknown as Prisma.InputJsonValue)
+                    : Prisma.DbNull,
                   promptTokens,
                   completionTokens,
                 },

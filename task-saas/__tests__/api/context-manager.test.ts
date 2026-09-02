@@ -18,9 +18,72 @@ afterEach(restoreEnv);
 
 describe("estimateTokens", () => {
   it("uses the prose ratio for ordinary text", () => {
-    expect(estimateTokens("abcd")).toBe(1);
-    expect(estimateTokens("abcde")).toBe(2);
+    // Recalibrated 2026-09-02: prose measured 5.56 chars/token against the provider,
+    // so the divisor moved from 4.0 to 5.0. These numbers pin the new ratio.
+    expect(estimateTokens("abcde")).toBe(1);
+    expect(estimateTokens("abcdef")).toBe(2);
     expect(estimateTokens("")).toBe(0);
+  });
+
+  it("still OVER-counts prose against its measured ratio", () => {
+    /**
+     * The safety property the chars/4 floor was standing in for, stated against the
+     * measurement instead of against history. Prose measured 5.56 chars/token; the
+     * divisor is 5.0, so the estimate must come out ABOVE the real count — over-counting
+     * wastes headroom, under-counting overflows the window.
+     *
+     * Sized from a LITERAL ratio, not from the divisor under test: fixtures derived from
+     * the constant move with a mutation and prove nothing.
+     */
+    const prose = "the quick brown fox jumps over the lazy dog and keeps on running ".repeat(40);
+    const realTokens = prose.length / 5.56;
+
+    expect(estimateTokens(prose)).toBeGreaterThan(realTokens);
+    // But not wildly so — the point of calibrating was to stop wasting a third of it.
+    expect(estimateTokens(prose)).toBeLessThan(realTokens * 1.25);
+  });
+
+  it("pins the CODE divisor between its measurement and the old value", () => {
+    /**
+     * ADDED AFTER MUTATION TESTING: reverting 3.2 to 3.0 survived, because nothing
+     * asserted the code divisor at all.
+     *
+     * Bracketed from LITERAL measured ratios, never from the constant under test.
+     * TypeScript measured 3.25–3.95 chars/token across three real files; the divisor is
+     * 3.2, deliberately below the minimum so the estimate stays high.
+     *
+     *   lower bound  len/3.25  the measured minimum — going above it means UNDER-counting
+     *   upper bound  len/3.15  tight enough that a revert to 3.0 breaks it
+     */
+    // Blended to land in the 0.12-0.2 punctuation band where real source files sit:
+    // pure dense code scores above 0.2 and heavily commented code below 0.12. The
+    // precondition below asserts the fixture really is in that band, so a fixture that
+    // drifts fails loudly instead of quietly testing a different branch.
+    const dense = "const {a, b} = opts; if (a?.x && b?.y) { return [a.x, b.y]; }\n";
+    const comment = "// Merge the incoming options with the defaults before sending it on\n";
+    const code = (dense.repeat(3) + comment.repeat(3)).repeat(14);
+    const est = estimateTokens(code);
+
+    expect(code.length / est).toBeGreaterThan(2.6);
+    expect(code.length / est).toBeLessThan(3.4);
+
+    expect(est).toBeGreaterThanOrEqual(Math.floor(code.length / 3.25));
+    expect(est).toBeLessThanOrEqual(Math.ceil(code.length / 3.15));
+  });
+
+  it("pins the JSON divisor against its measurement", () => {
+    /**
+     * ALSO ADDED AFTER MUTATION TESTING: loosening 2.5 to 3.0 survived.
+     *
+     * JSON measured 2.55 chars/token on ky's package.json — the one bucket the original
+     * estimator already had right, which is why the per-type branch was kept rather than
+     * collapsed. Bracketed the same way, from literals.
+     */
+    const json = '{"name":"pkg","version":"1.0.0","deps":{"a":"^1.2.3","b":"^4.5.6"}}'.repeat(20);
+    const est = estimateTokens(json);
+
+    expect(est).toBeGreaterThanOrEqual(Math.floor(json.length / 2.55));
+    expect(est).toBeLessThanOrEqual(Math.ceil(json.length / 2.45));
   });
 
   it("is more conservative for dense JSON than for prose of the same length", () => {
@@ -32,10 +95,21 @@ describe("estimateTokens", () => {
     expect(estimateTokens(json) / json.length).toBeGreaterThan(estimateTokens(prose) / prose.length);
   });
 
-  it("never estimates below the flat chars/4 baseline", () => {
-    // The V2 estimator was chars/4; V3 must not be more optimistic than that anywhere.
+  it("never estimates below the flat chars/4 baseline, for everything but prose", () => {
+    /**
+     * NARROWED 2026-09-02, and the reason matters more than the change.
+     *
+     * This guarded V3 against being "more optimistic than V2", where V2 was chars/4.
+     * That is a comparison against a historical constant, not against reality — and
+     * reality was measured: English prose runs 5.56 chars/token on this provider, so
+     * chars/4 over-counts it by 39%. Holding prose to a floor derived from a wrong
+     * baseline is what kept the estimator 32% pessimistic.
+     *
+     * The floor still applies to CODE and JSON, where it was never disproven and where
+     * under-counting is most dangerous: those are what fill a context window. Prose is
+     * asserted against its own measured ratio below instead.
+     */
     const samples = [
-      "plain english sentence here",
       '{"key":"value","n":[1,2,3]}',
       "export const x = (a: number): number => a * 2;",
       "A".repeat(500),
@@ -421,7 +495,12 @@ describe("ContextManager.buildContext", () => {
 
       // Large enough that nothing is left for the repository block once the message is
       // paid for, small enough not to overflow the window on its own.
-      const message = "z".repeat(1300);
+      //
+      // Resized 2026-09-02 with the estimator calibration. The assertion below is
+      // unchanged and still the point; only the input needed to grow, because a cheaper
+      // estimate left room for the repository block and the precondition — which exists
+      // precisely so the assertion cannot pass vacuously — stopped holding.
+      const message = "z".repeat(1500);
 
       const result = ContextManager.buildContext(
         [],

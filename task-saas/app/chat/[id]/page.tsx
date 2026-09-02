@@ -28,6 +28,8 @@ interface StoredMessage {
   createdAt?: string;
   artifacts?: StoredArtifact[];
   plan?: unknown;
+  /** Present only on a truncated whole-file edit. See Message.editTruncation. */
+  editTruncation?: unknown;
 }
 
 /**
@@ -49,6 +51,11 @@ function toMessage(stored: StoredMessage): Message {
   if (stored.plan) annotations.push({ codemindPlan: stored.plan } as unknown as JSONValue);
   if (stored.artifacts && stored.artifacts.length > 0) {
     annotations.push({ codemindArtifacts: stored.artifacts } as unknown as JSONValue);
+  }
+  // A truncated edit warns on the live stream; without this it would come back after a
+  // reload looking like a complete file.
+  if (stored.editTruncation) {
+    annotations.push({ codemindEditTruncated: stored.editTruncation } as unknown as JSONValue);
   }
 
   return annotations.length > 0 ? { ...base, annotations } : base;

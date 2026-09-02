@@ -259,6 +259,17 @@ model Message {
   ///
   /// Null means this turn was not an artifact attempt, or predates this column. It
   /// never means an attempt that succeeded silently.
+  /// Set only when a whole-file repository edit came back truncated.
+  ///
+  /// Persisted for the same reason `plan` is: the live stream emits it as a
+  /// codemindEditTruncated annotation, and without a stored copy a reload renders the
+  /// truncated code block with no warning at all. That is worse than never warning,
+  /// because the first render set the expectation that the code was complete.
+  ///
+  /// Null means "not a truncated edit" — not "checked and clean". Nothing writes this
+  /// on an ordinary turn.
+  editTruncation Json?
+
   artifactAttempt Json?
 
   @@index([conversationId])

@@ -346,6 +346,22 @@ export function readEditTruncation(annotations: unknown): EditTruncationSignal |
   return null;
 }
 
+/**
+ * Truncation signal for a finished edit reply, or null if it is complete.
+ *
+ * ONE IMPLEMENTATION, TWO CALLERS with different jobs: the stream guard annotates the
+ * live response so the browser learns immediately, and onFinish stores it so a reload
+ * still knows. Neither can do the other's work — the guard has no transaction and
+ * onFinish cannot inject into a stream it has already finished — so the check is shared
+ * rather than the call site.
+ */
+export function editTruncationFor(path: string, replyText: string): EditTruncationSignal | null {
+  const block = extractFencedBlock(replyText);
+  if (block === null) return null;
+  const reason = findEditTruncation(path, block);
+  return reason ? { path, reason, usable: false } : null;
+}
+
 /** What the user is told when a streamed edit turns out to be cut off. */
 export function truncationNotice(path: string, reason: string): string {
   return (

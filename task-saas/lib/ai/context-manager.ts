@@ -88,11 +88,39 @@ export { getContextTokenLimit, getOutputTokenLimit };
  * Content-aware token estimate. Still an estimate — there is no Nemotron tokenizer
  * in this codebase and this function must never be presented as exact.
  *
- * Plain prose runs ~4.16 chars/token against the live API; dense code and JSON run
- * nearer 2.5–3.5 because punctuation splits aggressively. A flat /4 is therefore
- * conservative for prose but *optimistic* for code, which is the dangerous direction.
- * Punctuation density selects a divisor, and every divisor is rounded down from the
- * measured ratio so the estimate leans high.
+ * CALIBRATED 2026-09-02 AGAINST THE PROVIDER, replacing an assumption that was
+ * measurably backwards. The previous comment here claimed a flat divisor was
+ * "*optimistic* for code, which is the dangerous direction". Measured, it is the
+ * opposite: every divisor was too LOW, so the estimator over-counted and the code
+ * leaned pessimistic everywhere except JSON.
+ *
+ * Method: each sample sent as a prompt with maxTokens 1, reading usage.promptTokens,
+ * minus a measured 17-token per-request baseline.
+ *
+ *   content                      chars   actual tok   real c/t   old divisor
+ *   ms/src/index.ts               5,864        1,804       3.25          3.0
+ *   ky/source/utils/merge.ts     10,470        2,716       3.85          3.0
+ *   ky/source/utils/normalize.ts  3,211          832       3.86          3.0
+ *   ky/package.json               2,317          907       2.55          2.5
+ *   ky/readme.md                 63,697       16,140       3.95          3.0
+ *   English prose (synthetic)     2,436          438       5.56          4.0
+ *
+ * PER-TYPE RATIOS ARE KEPT rather than collapsing to one constant. The punctuation
+ * density branch already discriminates content types correctly — JSON landed on 2.5 and
+ * measured 2.55, which is the branch working, not luck. A single constant fitted to code
+ * would under-count prose by 39%, and one fitted to prose would over-count JSON by more
+ * than double. The structure was right; only the numbers were wrong.
+ *
+ * THE SAFETY BIAS IS DELIBERATE AND ASYMMETRIC. Each divisor is set at or BELOW the
+ * MINIMUM real ratio observed for its bucket, never at the mean, because the two
+ * directions of error do not cost the same: over-counting wastes headroom that is
+ * currently abundant, while under-counting overflows the window and fails the request
+ * outright. So typical code takes 3.2 against a measured minimum of 3.25, and prose
+ * takes 5.0 against 5.56.
+ *
+ * The 0.06–0.12 bucket is UNMEASURED and therefore unchanged at 3.5. No sample landed
+ * in it, and moving a number with no evidence behind it is how the original values got
+ * here.
  */
 export function estimateTokens(text: string): number {
   if (!text) return 0;
@@ -127,13 +155,13 @@ export function estimateTokens(text: string): number {
 
   let divisor: number;
   if (punctuationRatio > 0.2) {
-    divisor = 2.5; // minified JSON, lockfiles, dense symbol soup
+    divisor = 2.5; // minified JSON, lockfiles, dense symbol soup — measured 2.55
   } else if (punctuationRatio > 0.12) {
-    divisor = 3.0; // typical TS/TSX/JSON
+    divisor = 3.2; // typical TS/TSX/JSON and markdown — measured 3.25 to 3.95
   } else if (punctuationRatio > 0.06) {
-    divisor = 3.5; // code with prose comments
+    divisor = 3.5; // code with prose comments — UNMEASURED, left as it was
   } else {
-    divisor = 4.0; // prose
+    divisor = 5.0; // prose — measured 5.56
   }
 
   // Long unbroken alphanumeric runs (base64, hashes, minified bundles) tokenize far
