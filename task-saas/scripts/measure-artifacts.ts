@@ -239,6 +239,10 @@ async function main(): Promise<void> {
               type: c.type,
               coverage: gen!.verification.coverage,
               warningCount: gen!.verification.warnings.length,
+              // The provider call alone. Without this the harness persists rows the
+              // production path would have timed, which is the asymmetry that forced
+              // durations to be reconstructed from message timestamps in the first place.
+              generationMs: gen!.generationMs,
               version: 1,
             } as object,
           },
@@ -267,8 +271,15 @@ async function main(): Promise<void> {
         );
       } else {
         const attempt = gen!.verification
-          ? attemptFromReport(gen!.verification, c.type)
-          : { ok: false, stage: gen!.stage, type: c.type, warningCount: 0, version: 1 as const };
+          ? attemptFromReport(gen!.verification, c.type, gen!.generationMs)
+          : {
+              ok: false,
+              stage: gen!.stage,
+              type: c.type,
+              warningCount: 0,
+              generationMs: gen!.generationMs,
+              version: 1 as const,
+            };
         await prisma.message.create({
           data: {
             conversationId: conversation.id,
