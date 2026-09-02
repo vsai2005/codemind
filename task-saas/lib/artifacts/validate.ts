@@ -41,6 +41,29 @@ const PLACEHOLDER_RE =
   /^(?:your|my|the|placeholder|example|changeme|change-me|xxx+|\.\.\.|<|\{\{|sk-xxx|generate|replace|todo|insert|add-)/i;
 
 /**
+ * A value that ANNOUNCES itself as fake by its content rather than its first word.
+ *
+ * PLACEHOLDER_RE alone reads only the prefix, so it accepted `your-secret-here` and
+ * rejected `postgresql://user:password@localhost:5432/mydb` -- the connection string
+ * Prisma's own documentation puts in `.env.example`. A real generated project was
+ * refused for shipping the canonical example.
+ *
+ * Two shapes, both unambiguous:
+ *   1. a credential pair whose password IS the word "password" (or passwd/secret/
+ *      changeme). Nobody's live database is reached with `user:password@`.
+ *   2. a loopback or documentation host. A URL pointing at localhost cannot leak
+ *      anyone's credentials because it does not address anyone's machine.
+ *
+ * Deliberately narrow. `postgresql://admin:Xk9mQ2@prod.example-corp.io/db` matches
+ * neither and is still blocked, which is the case this check exists for.
+ */
+const PLACEHOLDER_VALUE_RE =
+  /:(?:password|passwd|pass|secret|changeme|yourpassword)@|(?:^|[/@])(?:localhost|127\.0\.0\.1|0\.0\.0\.0|host\.docker\.internal|example\.com)(?::|\/|$)/i;
+
+/** A line commented out with `#` or `//`. It assigns nothing. */
+const COMMENT_LINE_RE = /^\s*(?:#|\/\/)/;
+
+/**
  * Returns a human-readable reason when content must not be exported, else null.
  * Shared by artifact packaging and the legacy /api/export routes.
  */
@@ -53,8 +76,21 @@ export function findSecretLeak(filePath: string, content: string): string | null
     return `"${filePath}" contains what looks like a live API key`;
   }
 
-  const assigned = ASSIGNED_SECRET_RE.exec(content);
-  if (assigned && !PLACEHOLDER_RE.test(assigned[2])) {
+  /**
+   * Line by line, and COMMENTED LINES ARE SKIPPED.
+   *
+   * Scanning the whole blob matched `# DATABASE_URL=mongodb://localhost:27017/blog`
+   * as an assignment, because the pattern is unanchored and a `#` two characters to
+   * its left means nothing to it. That rejected a project whose author had done the
+   * careful thing and commented the line out.
+   */
+  for (const line of content.split(/\r?\n/)) {
+    if (COMMENT_LINE_RE.test(line)) continue;
+
+    const assigned = ASSIGNED_SECRET_RE.exec(line);
+    if (!assigned) continue;
+    if (PLACEHOLDER_RE.test(assigned[2]) || PLACEHOLDER_VALUE_RE.test(assigned[2])) continue;
+
     return `"${filePath}" assigns a real value to ${assigned[1]}`;
   }
 
