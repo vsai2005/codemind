@@ -112,6 +112,8 @@ export type ArtifactGeneration =
       usage: ArtifactUsage;
       /** Wall time inside the provider call. See `generationMs` on the failure arm. */
       generationMs: number;
+      /** The model's response text, exactly as it arrived. See the failure arm. */
+      rawOutput: string;
       /**
        * Static verification result. Present on success including when it carries
        * warnings — an artifact is only `ok: true` if verification found no ERRORS.
@@ -137,6 +139,21 @@ export type ArtifactGeneration =
        * two can be identical.
        */
       generationMs: number;
+      /**
+       * The model's response text, EXACTLY as it arrived — unparsed, unscrubbed,
+       * untrimmed.
+       *
+       * WHY A REJECTED GENERATION MUST KEEP ITS BYTES. Twice now the most informative
+       * result available was thrown away at the moment it was produced: the
+       * middleware.ts naming defect and a validation rejection reading
+       * `"slugify.ts" ends mid-statement ("<")`. In both cases the question — is the
+       * checker right? — is answerable only from the source, and the source was gone
+       * because nothing downstream of a rejection persisted it.
+       *
+       * Absent when the provider call itself failed, because then there is no output
+       * to keep. Present for every rejection AFTER the model answered.
+       */
+      rawOutput?: string;
       /**
        * Which stage rejected it. Always set, because a failure that cannot say where it
        * happened is not measurable — and the responses differ: rising truncation means
@@ -291,6 +308,7 @@ export async function generateArtifact(
       ok: false,
       stage: "truncation",
       generationMs,
+      rawOutput: output,
       errors: [
         "the project was larger than one generation can hold, so the output was cut off",
       ],
@@ -303,12 +321,19 @@ export async function generateArtifact(
       ok: false,
       stage: "parse",
       generationMs,
+      rawOutput: output,
       errors: parsed.errors.length > 0 ? parsed.errors : ["the model produced no usable artifact"],
     };
   }
 
   const validation = validateArtifact(parsed.artifact, type);
-  if (!validation.ok) return { ok: false, stage: "validation", generationMs, errors: validation.errors };
+  if (!validation.ok) return {
+      ok: false,
+      stage: "validation",
+      generationMs,
+      rawOutput: output,
+      errors: validation.errors,
+    };
 
   /**
    * Static verification, after per-file validation and before anything is persisted.
@@ -330,6 +355,7 @@ export async function generateArtifact(
       ok: false,
       stage: "verification",
       generationMs,
+      rawOutput: output,
       errors: verification.errors.map((finding) => finding.message),
       verification,
     };
@@ -338,6 +364,7 @@ export async function generateArtifact(
   return {
     ok: true,
     generationMs,
+    rawOutput: output,
     artifact: validation.artifact,
     summary: parsed.summary ?? defaultSummary(validation.artifact),
     usage,

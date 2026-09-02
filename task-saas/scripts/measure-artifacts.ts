@@ -226,6 +226,23 @@ async function main(): Promise<void> {
       const stem = `${arm}__${c.label}`;
       writeFileSync(join(outDir, `${stem}.json`), JSON.stringify(record, null, 2), "utf-8");
 
+      /**
+       * RAW OUTPUT FOR EVERY OUTCOME, written before anything can reject it.
+       *
+       * Previously only successes kept their files, which threw away the most
+       * informative result available on exactly the runs worth studying: the
+       * middleware.ts naming defect and a `"slugify.ts" ends mid-statement ("<")`
+       * rejection both became unanswerable because the bytes were gone. A checker
+       * verdict cannot be audited without the source it judged.
+       *
+       * `.txt`, unparsed and unescaped, so the file on disk is byte-for-byte what the
+       * model sent — a JSON wrapper would re-encode the newlines and quoting that a
+       * truncation question turns on. `.measure/` is gitignored.
+       */
+      if (gen!.rawOutput !== undefined) {
+        writeFileSync(join(outDir, `${stem}.raw.txt`), gen!.rawOutput, "utf-8");
+      }
+
       if (gen!.ok) {
         const { body } = await buildArtifactBytes(gen!.artifact);
         const message = await prisma.message.create({
