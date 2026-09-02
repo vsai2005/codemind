@@ -73,6 +73,22 @@ const DEEPSEEK_MAX_OUTPUT_TOKENS = 16_384;
 const KIMI_K3_MAX_OUTPUT_TOKENS = 16_384;
 
 /**
+ * Inkling Small reasons by DEFAULT. OpenRouter reports `reasoning.default_enabled: true`
+ * with a default effort of "high" — not mandatory, unlike the withdrawn Ox Alpha, so a
+ * non-reasoning path exists, but nothing here turns it off. Those thinking tokens bill
+ * against the same output budget as the visible reply, so a ceiling sized for the answer
+ * alone would let a model truncate itself with its own reasoning pass.
+ *
+ * The provider allows 262,144. This is deliberately far lower, for the reason the chat
+ * clamp already encodes: `resolveModel` takes the min of this and AI_MAX_OUTPUT_TOKENS
+ * (16,384 by default), so the runtime budget is what binds today either way. Claiming
+ * the provider's full headroom here would only matter if an operator raised that budget,
+ * and a quarter of a million output tokens is a cost and latency decision to make
+ * deliberately rather than inherit from a catalogue.
+ */
+const INKLING_SMALL_MAX_OUTPUT_TOKENS = 32_768;
+
+/**
  * MEASURED, not advertised. NVIDIA's /v1/models returns no context metadata for this
  * model and the endpoint accepts any max_tokens without complaint, so the window was
  * established by probing: a 546,087-token prompt was accepted and answered on
@@ -194,6 +210,37 @@ function buildRegistry(): ModelDescriptor[] {
       // 2026-08-24 while Nemotron on the same NVIDIA host stayed responsive). Listed
       // so users know it's coming, but not selectable until that's resolved.
       comingSoon: true,
+    },
+
+    {
+      id: "inkling-small",
+      displayName: process.env.OPENROUTER_DISPLAY_NAME || "Inkling Small",
+      provider: "openrouter",
+      providerLabel: "OpenRouter",
+      /**
+       * Resolved from OpenRouter's public catalogue on 2026-09-02, not guessed from the
+       * display name: the `:free` suffix is a distinct id from `thinkingmachines/
+       * inkling-small`, and the catalogue also carries `:batch` and a full-size
+       * `inkling`. Env-overridable so an operator can move to the paid id — or off a
+       * free tier that gets withdrawn — without a deploy. That is not hypothetical:
+       * the last OpenRouter entry here was deleted when its id 404'd upstream.
+       */
+      providerModelId: process.env.OPENROUTER_MODEL || "thinkingmachines/inkling-small:free",
+      // Catalogue reports 1,048,576 — the same window the other frontier entries use.
+      providerContextTokens: FRONTIER_CONTEXT_TOKENS,
+      maxOutputTokens: INKLING_SMALL_MAX_OUTPUT_TOKENS,
+      // UNVERIFIED against the live endpoint, unlike Kimi's entry below-the-line notes.
+      // OpenRouter serves SSE for every model it brokers, so this is the safe default
+      // rather than a measurement; the first real turn confirms or corrects it.
+      supportsStreaming: true,
+      /**
+       * `input_modalities` is ["text","image","audio"]. Only the image half is reachable
+       * from CodeMind: /api/upload accepts images as data URLs and rejects audio and
+       * video outright. So vision here means images, as it does for Gemini.
+       */
+      supportsVision: true,
+      strengths: ["Long Context", "Coding", "Reasoning"],
+      enabled: true,
     },
   ];
 }
