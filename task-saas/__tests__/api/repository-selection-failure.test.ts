@@ -63,6 +63,20 @@ vi.mock("@/lib/repo/github", async (importOriginal) => {
     fetchFileContent: vi.fn(async (_ref: unknown, _sha: string, path: string) =>
       `// contents of ${path}\nexport const x = 1;`
     ),
+    /**
+     * Mocked at the boundary the route actually calls. The route moved from a serial
+     * fetchFileContent loop to this bounded pool, and the real pool calls
+     * fetchFileContent lexically — so mocking only that export no longer intercepts
+     * anything. Returning results IN INPUT ORDER matches the contract the route relies
+     * on for packing priority.
+     */
+    fetchFilesInOrder: vi.fn(async (_ref: unknown, _sha: string, paths: readonly string[]) =>
+      paths.map((path) => ({
+        path,
+        content: `// contents of ${path}\nexport const x = 1;`,
+        error: null,
+      }))
+    ),
   };
 });
 

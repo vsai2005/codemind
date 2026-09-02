@@ -546,3 +546,82 @@ export async function fetchFileContent(
   }
   return text;
 }
+
+/**
+ * How many file reads one turn issues at once.
+ *
+ * FIVE, NOT TEN, and the difference is about a budget that is not ours alone. GitHub
+ * asks callers to avoid concurrent bursts against a single credential, and this server
+ * holds ONE shared token for every user: ten-wide bursts from several turns at once is
+ * how a secondary rate limit gets tripped for everybody, not just the user who caused
+ * it. Five reads a ten-file turn in two waves, which recovers most of the latency a
+ * serial loop wasted while halving the burst.
+ *
+ * Measured 2026-09-03 on three real ky questions at a cap of ten files — see
+ * fetchFilesInOrder for the figures.
+ */
+export const REPOSITORY_FETCH_CONCURRENCY = 5;
+
+/** One file's outcome. Exactly one of `content` and `error` is non-null. */
+export interface FileFetchResult {
+  path: string;
+  content: string | null;
+  error: string | null;
+}
+
+/**
+ * Read several files concurrently, in a bounded pool, returning them IN INPUT ORDER.
+ *
+ * REPLACES A SERIAL LOOP that cost ~400-500ms per file. At a cap of ten that was 3.7 to
+ * 4.4 seconds of every repo-backed turn spent waiting on requests with no ordering
+ * dependency between them.
+ *
+ * TWO PROPERTIES THIS MUST NOT LOSE, both of which a naive rewrite drops:
+ *
+ * 1. ONE FAILURE MUST NOT LOSE THE OTHERS. `Promise.all` rejects on the first
+ *    rejection and abandons the rest, which would turn a single unreadable file into a
+ *    turn with no repository context at all. Every read is caught individually here and
+ *    reported as an `error` entry, so the caller decides what a partial result means.
+ *
+ * 2. ORDER IS SELECTION'S ANSWER, NOT COMPLETION'S. Files arrive in whatever order the
+ *    network returns them, and the packer treats earlier files as more important — it
+ *    fills the budget in order and clamps only the first file when nothing else fits.
+ *    Letting completion order through would quietly re-rank the repository by latency.
+ *    Results are written into a pre-sized array by index, so the output matches the
+ *    input positionally whatever order they finish in.
+ */
+export async function fetchFilesInOrder(
+  ref: RepoRef,
+  commitSha: string,
+  paths: readonly string[],
+  concurrency: number = REPOSITORY_FETCH_CONCURRENCY,
+  /**
+   * The read to perform, injectable so the pool's own behaviour — ordering, failure
+   * isolation, and the concurrency ceiling — can be tested without a network. Production
+   * never passes it.
+   */
+  read: (ref: RepoRef, sha: string, path: string) => Promise<string> = fetchFileContent
+): Promise<FileFetchResult[]> {
+  const results: FileFetchResult[] = paths.map((path) => ({ path, content: null, error: null }));
+  if (paths.length === 0) return results;
+
+  // A shared cursor rather than fixed slices: files differ in size by orders of
+  // magnitude, so slicing would leave workers idle behind one large read.
+  let next = 0;
+  const workerCount = Math.max(1, Math.min(concurrency, paths.length));
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = next++;
+      if (index >= paths.length) return;
+      try {
+        results[index].content = await read(ref, commitSha, paths[index]);
+      } catch (error) {
+        results[index].error = error instanceof Error ? error.message : "unknown";
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: workerCount }, worker));
+  return results;
+}

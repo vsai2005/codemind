@@ -56,7 +56,7 @@ import {
   validateSummary,
   SUMMARY_MAX_OUTPUT_TOKENS,
 } from "@/lib/ai/summarization";
-import { fetchFileContent } from "@/lib/repo/github";
+import { fetchFilesInOrder } from "@/lib/repo/github";
 import { detectEntryPoints } from "@/lib/repo/structure";
 import {
   expandAlongEdges,
@@ -735,6 +735,7 @@ export async function POST(req: Request): Promise<Response> {
      * told about, and the user cannot see one that never appears in the reply.
      */
     let repositoryNote: string | undefined;
+    let repositoryNoteKind: "unavailable" | "no-match" | "turn" | undefined;
 
     if (repository) {
       const selection = await loadRepositoryFiles({
@@ -745,11 +746,33 @@ export async function POST(req: Request): Promise<Response> {
 
       repositoryFiles = selection.files.length > 0 ? selection.files : undefined;
 
+      /**
+       * TWO DIFFERENT FACTS, and conflating them tells the user the wrong thing.
+       *
+       * `loadFailed` means the repository was never consulted — the index could not be
+       * read, or every fetch failed. Nothing selected means it WAS consulted and the
+       * ranking found nothing worth reading for this question.
+       *
+       * Both used to produce the same outcome for the reader: an answer written as
+       * though the code had been seen. Only the first said so. The second is the same
+       * false-negative class as the silent truncation fixed earlier — the model answers
+       * from the conversation alone and sounds exactly as confident as it would with
+       * the files in front of it.
+       */
       if (selection.loadFailed) {
+        repositoryNoteKind = "unavailable";
         repositoryNote =
           "The repository attached to this project could not be read for this message, " +
           "so none of its source is available here. Say so plainly before answering, " +
           "and do not describe the repository's code as though you had seen it.";
+      } else if (selection.files.length === 0) {
+        repositoryNoteKind = "no-match";
+        repositoryNote =
+          "The repository attached to this project was searched for this message and no " +
+          "file matched closely enough to include, so none of its source is in front of " +
+          "you. Say plainly that you are answering without having read the code, and " +
+          "name the file or symbol you would need. Do not describe the repository's " +
+          "contents from memory or from the conversation.";
       }
     }
 
@@ -766,6 +789,9 @@ export async function POST(req: Request): Promise<Response> {
         projectMemory,
         repositoryFiles,
         repositoryNote: noteOverride ?? repositoryNote,
+        // An edit turn's note is about files that ARE present; anything else keeps the
+        // kind the selection produced.
+        repositoryNoteKind: noteOverride ? "turn" : repositoryNoteKind,
       });
 
     let context = buildContext();
@@ -1994,19 +2020,35 @@ async function loadRepositoryFiles(params: {
     }
 
     const ref = { owner: repository.owner, name: repository.name };
-    const files: Array<{ path: string; content: string }> = [];
 
-    for (const file of chosen) {
-      try {
-        const content = await fetchFileContent(ref, repository.commitSha, file.path);
-        files.push({ path: file.path, content });
-      } catch (error) {
-        // One unreadable file must not lose the others already fetched.
-        logger.warn("Could not read a repository file", {
-          path: file.path,
-          error: error instanceof Error ? error.message : "unknown",
-        });
+    /**
+     * Concurrent, bounded, and ORDER-PRESERVING. These reads have no dependency on one
+     * another, so the serial loop this replaces spent 400-500ms per file waiting for
+     * nothing — 3.7 to 4.4 seconds of a ten-file turn.
+     *
+     * fetchFilesInOrder catches each read individually and returns results positionally,
+     * which keeps the two properties the serial loop protected: one unreadable file must
+     * not lose the others, and the packer must receive files in SELECTION order rather
+     * than completion order, since it fills the budget in order and treats earlier files
+     * as more important.
+     */
+    const fetched = await fetchFilesInOrder(
+      ref,
+      repository.commitSha,
+      chosen.map((file) => file.path)
+    );
+
+    const files: Array<{ path: string; content: string }> = [];
+    for (const result of fetched) {
+      if (result.content !== null) {
+        files.push({ path: result.path, content: result.content });
+        continue;
       }
+      // Logged per file exactly as before, so a partial fetch is still diagnosable.
+      logger.warn("Could not read a repository file", {
+        path: result.path,
+        error: result.error ?? "unknown",
+      });
     }
 
     // Counted from what was actually FETCHED, not from what was chosen: a graph file

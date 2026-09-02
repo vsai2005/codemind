@@ -511,6 +511,12 @@ export interface BuildContextOptions {
    * unsupported languages — report the gap rather than let silence imply coverage.
    */
   repositoryNote?: string;
+  /**
+   * Which kind of repository note this is. See the header selection in buildContext:
+   * "unavailable" (never read), "no-match" (read, nothing selected) and "turn" (a note
+   * about files that ARE present) are three different facts and read differently.
+   */
+  repositoryNoteKind?: "unavailable" | "no-match" | "turn";
 }
 
 export interface BuildContextResult {
@@ -759,17 +765,26 @@ Durable facts about this project:
     // there is nothing to render beside it.
     if (options.repositoryNote) {
       /**
-       * One field, two headers. The note used to render ONLY when there were no files,
-       * because "unavailable" was the only thing a caller ever had to say. An edit turn
-       * needs to say something when the file IS present — that the whole file is in
-       * view and a whole file is wanted back — and that is the same kind of per-turn
-       * repository instruction, so it travels the same way rather than growing a second
-       * channel beside it.
+       * One field, three headers, chosen by an explicit KIND rather than inferred.
+       *
+       * It used to be inferred from whether any files were present, which worked while
+       * there were only two cases. There are three: a repository that could not be read,
+       * a repository that WAS read and matched nothing, and a note about files that are
+       * present. The first two both have zero files, so no amount of counting can tell
+       * them apart — and telling the user "unavailable" when the repository was searched
+       * and simply had nothing to offer is the conflation this discriminator exists to
+       * prevent. An absent kind falls back to the old inference, so existing callers
+       * behave exactly as before.
        */
+      const kind =
+        options.repositoryNoteKind ??
+        (!options.repositoryFiles || options.repositoryFiles.length === 0 ? "unavailable" : "turn");
       const header =
-        !options.repositoryFiles || options.repositoryFiles.length === 0
+        kind === "unavailable"
           ? "--- REPOSITORY CONTEXT UNAVAILABLE ---"
-          : "--- REPOSITORY TURN NOTE ---";
+          : kind === "no-match"
+            ? "--- REPOSITORY SEARCHED, NO FILE MATCHED ---"
+            : "--- REPOSITORY TURN NOTE ---";
       const notice = `
 
 ${header}
