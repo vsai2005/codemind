@@ -145,12 +145,33 @@ const NODE_BUILTINS = new Set([
 /**
  * Package name from a specifier: `@scope/pkg/sub` -> `@scope/pkg`, `pkg/sub` -> `pkg`.
  * Returns null for a builtin, which is not a dependency anyone declares.
+ *
+ * THE DEFECT THIS FIXES, measured on a 42-case run.
+ * The builtin lookup used to test the WHOLE specifier after stripping `node:`, so a
+ * subpath never matched the set: `node:assert/strict` became "assert/strict", missed,
+ * and fell through to be reported as an undeclared dependency on "assert". The same
+ * path made `node:fs/promises` a missing dependency on "fs" -- an import common enough
+ * that this was rejecting ordinary projects.
+ *
+ * A `node:` PREFIX IS DECIDED BY THE PREFIX, NOT BY THE LIST. Anything spelled `node:x`
+ * is a builtin by definition; the runtime resolves that scheme and nothing else. Relying
+ * on the set instead meant the check silently aged out as Node added modules -- `test`
+ * (Node 18) was missing, which is exactly what rejected a test file importing
+ * `node:test`. A prefix rule cannot fall behind a release.
+ *
+ * WITHOUT the prefix, the ROOT SEGMENT is what is tested, so `fs/promises` resolves to
+ * `fs` and is recognised. The distinction is deliberate and not pedantic: bare `test` is
+ * an npm package, while `node:test` is the runtime's test runner, and `test` is
+ * therefore absent from the set on purpose. Adding it would have hidden a real missing
+ * dependency in any project importing the package.
  */
 function packageNameOf(specifier: string): string | null {
-  const bare = specifier.startsWith("node:") ? specifier.slice(5) : specifier;
-  if (NODE_BUILTINS.has(bare)) return null;
+  if (specifier.startsWith("node:")) return null;
 
+  const bare = specifier;
   const parts = bare.split("/");
+  if (!bare.startsWith("@") && NODE_BUILTINS.has(parts[0])) return null;
+
   if (bare.startsWith("@")) {
     if (parts.length < 2) return null;
     return `${parts[0]}/${parts[1]}`;
