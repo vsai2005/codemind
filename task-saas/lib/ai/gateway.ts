@@ -188,15 +188,33 @@ async function fetchWithScheduler(input: RequestInfo | URL, init?: RequestInit):
 
     let response: Response;
     try {
-      // Header-phase timeout only: a stalled endpoint becomes a classifiable network
-      // failure that can fail over, instead of a request that hangs holding a lease.
+      // Deadline enforced per request shape: a stalled endpoint becomes a classifiable
+      // failure instead of a request that hangs holding a lease.
       response = await fetchWithHeaderTimeout(input, { ...init, headers });
     } catch (error) {
       const classification = classifyNetworkError(error);
 
-      if (classification.kind === "aborted") {
-        // The caller went away. The key is blameless — return it unpenalised.
+      // TWO WAYS OF NOT BLAMING THE KEY, and they are not the same event.
+      //
+      //   "aborted"  — the caller went away. Nobody is waiting for an answer.
+      //   "deadline" — WE stopped waiting. Someone is still waiting, and they get an
+      //                error that says so; but the provider never got the chance to
+      //                fail, so there is nothing to charge to the credential.
+      //
+      // Neither may reach reportFailure. Before the deadline case existed, our own
+      // timer arrived here as a plain Error, was classified "network", and benched a
+      // working key for 30s — three keys and 175s for one slow 500-token request, which
+      // read in the logs as a provider outage that was never happening.
+      if (classification.kind === "aborted" || classification.kind === "deadline") {
         lease.release();
+        if (classification.kind === "deadline") {
+          logger.warn("AI gateway deadline exceeded", {
+            key: lease.id,
+            attempt,
+            // Scrubbed by the classifier; names the budget and the request shape.
+            reason: classification.reason,
+          });
+        }
         throw error;
       }
 

@@ -76,6 +76,53 @@ const NON_STREAMING_COMPLETION_TIMEOUT_MS = 180_000;
  */
 export const HEADER_TIMEOUT_HEADER = "x-codemind-header-timeout-ms";
 
+/**
+ * Thrown when OUR OWN timer gives up, as distinct from the provider failing.
+ *
+ * THE DEFECT THIS CLOSES
+ * The timer used to abort with a bare `new Error(...)`. A plain Error matches none of
+ * the three names `isAbortError` looks for, so `classifyNetworkError` fell through to
+ * `kind: "network"` — shouldFailover true, 30s cooldown — and the gateway benched a
+ * perfectly healthy key for the crime of being slower than a deadline WE chose. One
+ * 500-token request cooled three of six keys and took 175s to surface as what looked
+ * like a provider outage. The classifier already had the right branch for "we stopped
+ * waiting"; the timer simply never produced an object that could reach it.
+ *
+ * A CLASS RATHER THAN A MESSAGE PREFIX. The message now embeds a deadline that varies
+ * by request shape, so matching on text would be matching on a moving target — and a
+ * provider is perfectly capable of putting the word "timeout" in an error of its own.
+ * Identity cannot be faked by anything arriving over the wire.
+ *
+ * The three sources stay distinguishable: this class is constructed here and nowhere
+ * else; a provider dropping the socket surfaces as ECONNRESET / UND_ERR_SOCKET; a user
+ * navigating away surfaces as a DOMException named AbortError carried on the caller's
+ * own signal.
+ */
+export class ProviderDeadlineError extends Error {
+  readonly name = "ProviderDeadlineError";
+  /** The deadline that elapsed, in ms. */
+  readonly deadlineMs: number;
+  /** Which deadline it was — the two mean different things. See the constants above. */
+  readonly streaming: boolean;
+
+  constructor(deadlineMs: number, streaming: boolean) {
+    super(
+      streaming
+        ? `Provider sent no response headers within ${deadlineMs}ms (streaming deadline)`
+        : `Generation did not complete within ${deadlineMs}ms (non-streaming deadline). ` +
+          `A non-streamed request sends no response until the whole completion exists, ` +
+          `so this deadline covers generation, not just the header phase.`
+    );
+    this.deadlineMs = deadlineMs;
+    this.streaming = streaming;
+  }
+}
+
+/** True only for a deadline this module imposed. Never true for a provider fault. */
+export function isProviderDeadlineError(error: unknown): error is ProviderDeadlineError {
+  return error instanceof ProviderDeadlineError;
+}
+
 /** Nothing may ask for less than the default's floor or more than five minutes. */
 const MIN_OVERRIDE_MS = 1_000;
 const MAX_OVERRIDE_MS = 300_000;
@@ -179,8 +226,11 @@ export async function fetchWithHeaderTimeout(
     else callerSignal.addEventListener("abort", onCallerAbort, { once: true });
   }
 
+  // The reason is a typed error, not a string: it is what lets the gateway tell "we
+  // stopped waiting" from "the provider never answered" and leave the key unpunished.
+  const streaming = isStreamingRequest(init);
   const timer = setTimeout(() => {
-    controller.abort(new Error(`Provider sent no response headers within ${timeoutMs}ms`));
+    controller.abort(new ProviderDeadlineError(timeoutMs, streaming));
   }, timeoutMs);
 
   const cleanup = (): void => {

@@ -23,6 +23,11 @@
  * document text. See `scrubForLog`.
  */
 
+import {
+  isProviderDeadlineError,
+  type ProviderDeadlineError,
+} from "./fetch-timeout";
+
 import { redactSecrets } from "@/lib/logger";
 
 export type FailureKind =
@@ -33,6 +38,7 @@ export type FailureKind =
   | "context_length"
   | "client_error"
   | "aborted"
+  | "deadline"
   | "unknown";
 
 export interface FailureClassification {
@@ -309,9 +315,18 @@ function describeNetworkError(error: unknown): string {
   return parts.length > 0 ? scrubForLog(parts.join(" / ")) : "unknown transport fault";
 }
 
+/** Safe description of a deadline abort: the budget and which shape it applied to. */
+function describeDeadline(error: ProviderDeadlineError): string {
+  return `${error.deadlineMs}ms, ${error.streaming ? "streaming" : "non-streaming"}`;
+}
+
 /**
- * True when the caller cancelled the request — a browser disconnect, a user pressing
- * stop, or an upstream timeout guard firing.
+ * True when the caller cancelled the request — a browser disconnect or a user pressing
+ * stop.
+ *
+ * NOT our own deadline timer any more: that throws ProviderDeadlineError and is
+ * classified above, because "the user walked away" and "we ran out of patience" call
+ * for different handling of the in-flight request.
  */
 export function isAbortError(error: unknown): boolean {
   const err = asErrorLike(error);
@@ -334,6 +349,43 @@ export function isAbortError(error: unknown): boolean {
  * never mark the key unhealthy.
  */
 export function classifyNetworkError(error: unknown): FailureClassification {
+  // Checked first for legibility, not because the order is load-bearing: the two
+  // predicates are disjoint. ProviderDeadlineError is named for itself, so isAbortError
+  // — which matches only AbortError, TimeoutError and ABORT_ERR — is false for it, and
+  // swapping these blocks changes no verdict today. That disjointness is asserted in
+  // the tests, because it is the property keeping them separate; if a future runtime
+  // ever gave the deadline error an abort-shaped name, this ordering is what would stop
+  // the two collapsing into one.
+  if (isProviderDeadlineError(error)) {
+    return {
+      kind: "deadline",
+      // NO FAILOVER. Deliberate, and the argument runs against the usual instinct.
+      //
+      // The deadline is a property of the REQUEST and the MODEL, not of the credential.
+      // Re-running an identical generation on a fresh key re-runs it with the same
+      // deadline, and if the request is simply slower than that deadline the result is
+      // another timeout, another key benched, and another full deadline of wall clock
+      // spent. Today that cost 175s across three keys at 60s each; at the non-streaming
+      // deadline it would be nine minutes to reach the same non-answer.
+      //
+      // The retry is also not side-effect free: the provider may still be generating the
+      // completion we walked away from, so failing over adds load to an endpoint we have
+      // just established is too slow.
+      //
+      // What would justify retrying is evidence that THIS KEY is stuck while others are
+      // fine — but our timer cannot see that. It fires identically for a stalled socket
+      // and for an honestly slow generation, and distinguishing them needs a
+      // bytes-received signal this module does not have. Spending the pool to resolve an
+      // ambiguity it cannot resolve is the worse bet.
+      shouldFailover: false,
+      // The key did nothing wrong. Cooling it down is what turned one slow generation
+      // into a fake outage.
+      cooldownMs: NO_COOLDOWN_MS,
+      markUnhealthy: false,
+      reason: `Client deadline exceeded (${describeDeadline(error)})`,
+    };
+  }
+
   if (isAbortError(error)) {
     return {
       kind: "aborted",
