@@ -100,6 +100,18 @@ const INKLING_SMALL_MAX_OUTPUT_TOKENS = 32_768;
  * this path — so it is stated as its own constant rather than reusing a shared one that
  * happens to be near it today.
  */
+/**
+ * GLM 5.3 Flash, resolved from OpenRouter's catalogue on 2026-09-03 rather than guessed:
+ * 1,310,720 context and 131,072 max completion tokens, both read from the entry itself.
+ *
+ * The context number is far above CODEMIND_TARGET_CONTEXT_TOKENS, so `resolveModel`
+ * clamps it to 512,000 like every other frontier entry. It is recorded truthfully here
+ * anyway, because this field means "what the provider supports", not "what CodeMind
+ * sends" — the clamp is the place that decision belongs.
+ */
+const GLM_5_3_FLASH_CONTEXT_TOKENS = 1_310_720;
+const GLM_5_3_FLASH_MAX_OUTPUT_TOKENS = 131_072;
+
 const OPENROUTER_NEMOTRON_CONTEXT_TOKENS = 1_000_000;
 const OPENROUTER_NEMOTRON_MAX_OUTPUT_TOKENS = 65_536;
 
@@ -324,6 +336,47 @@ function buildRegistry(): ModelDescriptor[] {
       // OpenRouter lists input_modalities ["text"] for this route — no vision, matching
       // the direct NVIDIA entry.
       supportsVision: false,
+      strengths: ["Long Context", "Coding", "Reasoning"],
+      enabled: true,
+    },
+
+    {
+      /**
+       * GLM 5.3 Flash, via OpenRouter.
+       *
+       * ID RESOLVED FROM THE CATALOGUE, not from the display name, because this family
+       * is exactly where that goes wrong: the catalogue carries `z-ai/glm-5.3` and
+       * `z-ai/glm-5.3-flash` as different models, plus a `:batch` variant of the flash
+       * and a floating `~z-ai/glm-flash-latest` alias, and all four have different
+       * prices and ceilings. The Inkling entry above was written after the same lesson,
+       * and an earlier OpenRouter entry was deleted outright when its guessed id 404'd.
+       *
+       * CHEAP AND LARGE. At $0.075 per million prompt tokens it is the least expensive
+       * entry in this registry by an order of magnitude, with the largest advertised
+       * context.
+       *
+       * IT REASONS BY DEFAULT, like every other model here, so it is NOT a candidate for
+       * the intent classifier below — that one needs a model which answers in one word
+       * without a thinking pass. This is a chat model.
+       *
+       * Its own env variable, deliberately. OPENROUTER_MODEL is already read by the
+       * Inkling entry, so sharing it would silently repoint both — the exact confusion
+       * that once left an entry labelled "Inkling Small" serving Nemotron.
+       */
+      id: "glm-5-3-flash",
+      displayName: "GLM 5.3 Flash",
+      provider: "openrouter",
+      providerLabel: "OpenRouter",
+      providerModelId: process.env.OPENROUTER_GLM_MODEL || "z-ai/glm-5.3-flash",
+      providerContextTokens: GLM_5_3_FLASH_CONTEXT_TOKENS,
+      maxOutputTokens: GLM_5_3_FLASH_MAX_OUTPUT_TOKENS,
+      supportsStreaming: true,
+      /**
+       * `input_modalities` is ["text","image","video"]. Only the image half is reachable
+       * from CodeMind, since /api/upload accepts images as data URLs and rejects video
+       * outright — so vision here means images, as it does for Gemini and Inkling.
+       */
+      supportsVision: true,
       strengths: ["Long Context", "Coding", "Reasoning"],
       enabled: true,
     },

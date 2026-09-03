@@ -17,6 +17,7 @@
     "test:watch": "vitest",
     "backfill:artifacts": "tsx scripts/backfill-artifacts.ts",
     "measure:artifacts": "tsx scripts/measure-artifacts.ts",
+    "check:model": "tsx --env-file=.env scripts/check-model.ts",
     "postinstall": "prisma generate"
   },
   "dependencies": {
