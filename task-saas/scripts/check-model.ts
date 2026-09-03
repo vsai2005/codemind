@@ -23,6 +23,20 @@ import { getProviderAdapter } from "@/lib/ai/models/providers";
 
 const PROMPT = "Reply with exactly one word: OK";
 
+/**
+ * Output budget for the probe, and it is NOT small on purpose.
+ *
+ * MEASURED, after this script reported a false failure on its first real use. Nearly
+ * every chat model in this registry reasons by default, so a tight cap is spent on the
+ * thinking pass and the visible reply comes back empty with finish=length. GLM 5.3 Flash
+ * returned "" at 16 tokens and "OK" at 128 — the model was fine, the probe was wrong.
+ *
+ * A diagnostic that fails on working models is worse than no diagnostic, so the budget
+ * is set well above what a reasoning pass needs for a one-word answer. This costs a few
+ * seconds per model and buys an answer that means something.
+ */
+const PROBE_MAX_TOKENS = 256;
+
 /** Never print a credential, only whether one is present. */
 function credentialState(id: string): string {
   const d = getModelDescriptor(id);
@@ -49,19 +63,19 @@ async function check(id: string): Promise<boolean> {
     const result = await generateText({
       model: resolved.model,
       prompt: PROMPT,
-      maxTokens: 16,
+      maxTokens: PROBE_MAX_TOKENS,
       temperature: 0,
       maxRetries: 0,
       abortSignal: AbortSignal.timeout(30_000),
     });
     const ms = Date.now() - started;
     const text = result.text.trim().replace(/\s+/g, " ").slice(0, 40);
-    // An empty reply is a REAL failure, not a pass: it is what a reasoning model returns
-    // when the whole token budget went to a thinking pass.
+    // An empty reply is still a REAL failure rather than a pass -- but with the budget
+    // above it now means something is genuinely wrong, not that the probe was too tight.
     const ok = text.length > 0;
     console.log(
       `  ${ok ? "OK      " : "EMPTY   "}  ${id.padEnd(30)} ${String(ms).padStart(6)}ms  ` +
-        `${JSON.stringify(text)}${ok ? "" : "   <- no visible text; check maxTokens"}`
+        `${JSON.stringify(text)}${ok ? "" : "   <- answered with nothing at all"}`
     );
     return ok;
   } catch (error) {
