@@ -173,11 +173,23 @@ describe("detectArtifactIntent", () => {
       });
     }
 
-    it("leaves 'pdf please' alone, one word from the bare noun", () => {
-      // Deliberate. Treating a politeness marker as evidence of intent is weak, and
-      // a miss now degrades gracefully: the model answers and invites the user to
-      // ask for the download explicitly.
-      expect(detectArtifactIntent("pdf please")).toBeNull();
+    it("now generates from 'pdf please' \— decision reversed, see below", () => {
+      /**
+       * REVERSED after independent measurement. This previously asserted null, on the
+       * reasoning that a politeness marker is weak evidence and the miss degrades
+       * gracefully.
+       *
+       * The reasoning held that the bare noun was the only available signal. It was
+       * not: "please" is one discriminator, noun-initial position is another, and a
+       * validation set built from phrasings this module was not written against put
+       * SIX misses in this single class \— including "pdf abou the the pyton", which a
+       * real user actually sent and which produced nothing.
+       *
+       * The four sibling assertions that motivated the original decision ("pdf",
+       * "pdfs", "i opened a pdf yesterday", "the pdf was corrupted") all still hold
+       * unchanged, which is what makes the narrower rule safe rather than a loosening.
+       */
+      expect(detectArtifactIntent("pdf please")?.type).toBe("pdf");
     });
   });
 
@@ -276,21 +288,13 @@ describe("detectArtifactIntent", () => {
       }
     });
 
-    describe("the bare noun stays chat, and that is deliberate", () => {
+    describe("a request carrying no verb the gate can match on", () => {
       /**
-       * "pdf please" was one of the six measured misses and is NOT fixed here.
-       *
-       * A rule broad enough to catch it — a short message with no interrogative — also
-       * classifies "pdf", "pdfs" and "the pdf was corrupted" as generation requests,
-       * which the suite above already forbids for good reason. Politeness is not
-       * evidence of intent, and this miss degrades gracefully: the model answers and
-       * the user can ask for the download in words.
-       *
-       * Recorded as a test so the trade-off is visible rather than looking like an
-       * oversight.
+       * The class that a later, independent validation set showed to be the single
+       * largest source of misses. Three signals, never the bare noun alone.
        */
-      it("does not generate from the noun plus a politeness marker", () => {
-        expect(detectArtifactIntent("pdf please")).toBeNull();
+      it("generates from the noun plus a politeness marker", () => {
+        expect(detectArtifactIntent("pdf please")?.type).toBe("pdf");
       });
 
       it("does not generate from a passing mention", () => {
@@ -338,6 +342,129 @@ describe("detectArtifactIntent", () => {
       expect(detectArtifactIntent("what is a pdf")).toBeNull();
       expect(detectArtifactIntent("what is a pdf, roughly")).toBeNull();
       expect(detectArtifactIntent("explain how a pdf is structured")).toBeNull();
+    });
+  });
+
+  /**
+   * FOUND BY INDEPENDENT VALIDATION.
+   *
+   * Everything above was measured against phrasings written by the same session that
+   * then fixed the code, so it could only confirm the rules it was derived from. This
+   * block comes from a set built the other way round: from actual messages in the dev
+   * database, one phrasing quoted in git history as a reported failure, and phrasings
+   * generated from a taxonomy of what users are DOING (asking for a document, reporting
+   * a broken file, asking a question about a format) rather than from reading the
+   * patterns.
+   *
+   * That set scored 76.2%, not the 100% the earlier one reported.
+   */
+  describe("word order decides which format is the head of the request", () => {
+    /**
+     * THE MIRROR FAILURE, which the earlier fix introduced and its tests could not see.
+     *
+     * Making a named PDF outrank an inferred ZIP was done by disabling the ZIP
+     * inference whenever "pdf" appeared anywhere. Three of four archive requests that
+     * merely mentioned a pdf then started returning a pdf. The one test covering both
+     * formats used a message containing the literal word "zip", which an earlier branch
+     * catches, so the guard's real behaviour was never exercised.
+     */
+    it("a pdf ABOUT a project is a pdf", () => {
+      expect(detectArtifactIntent("give me a pdf summary of this project")?.type).toBe("pdf");
+      expect(detectArtifactIntent("give me a pdf covering all the files")?.type).toBe("pdf");
+    });
+
+    it("a project CONTAINING a pdf is a project", () => {
+      expect(detectArtifactIntent("give me the project with a pdf readme inside")?.type).toBe(
+        "zip"
+      );
+      expect(detectArtifactIntent("package the source files and the pdf together")?.type).toBe(
+        "zip"
+      );
+      expect(detectArtifactIntent("i want the repo bundled up, pdf docs and all")?.type).toBe(
+        "zip"
+      );
+    });
+
+    it("still packages a project when no format is named at all", () => {
+      expect(detectArtifactIntent("give me this project")?.type).toBe("zip");
+      expect(detectArtifactIntent("i want all the files")?.type).toBe("zip");
+    });
+  });
+
+  describe("asking without a verb", () => {
+    it("a politeness marker turns the noun into a request", () => {
+      expect(detectArtifactIntent("pdf please")?.type).toBe("pdf");
+      expect(detectArtifactIntent("PDF of the API docs, please")?.type).toBe("pdf");
+      expect(detectArtifactIntent("emailable pdf of the schema please")?.type).toBe("pdf");
+    });
+
+    it("but never when the message is a question", () => {
+      // MUTATION GUARD. Politeness attaches to questions as readily as to requests,
+      // and the answer to a question is prose.
+      expect(detectArtifactIntent("can you please explain what a pdf is")).toBeNull();
+      expect(detectArtifactIntent("please explain how pdfs are compressed")).toBeNull();
+    });
+
+    it("a desire frame counts, when it touches the noun", () => {
+      expect(detectArtifactIntent("a pdf would be nice")?.type).toBe("pdf");
+      expect(detectArtifactIntent("any chance of a pdf?")?.type).toBe("pdf");
+    });
+
+    it("but not when the frame is about an existing file behaving", () => {
+      // MUTATION GUARD, and a false positive this rule actually caused before it was
+      // narrowed: an unanchored desire frame made a complaint into a request.
+      expect(detectArtifactIntent("it would be nice if the pdf worked")).toBeNull();
+    });
+
+    it("opening with the bare noun and a subject counts", () => {
+      expect(detectArtifactIntent("pdf of the retry logic")?.type).toBe("pdf");
+    });
+
+    it("but not mid-sentence, and not with an article", () => {
+      /**
+       * MUTATION GUARDS, both from real false positives. Unanchor the pattern and
+       * "i already have the pdf of the spec" becomes a request; allow a leading article
+       * and "the pdf of the spec is attached" becomes one too. A bare noun at the start
+       * of the message is the shape of an order; an article makes it a description.
+       */
+      expect(detectArtifactIntent("i already have the pdf of the spec, thanks")).toBeNull();
+      expect(detectArtifactIntent("the pdf of the spec is attached")).toBeNull();
+    });
+
+    it("the bare noun on its own is still never enough", () => {
+      // The constraint the original decision was protecting, still honoured.
+      expect(detectArtifactIntent("pdf")).toBeNull();
+      expect(detectArtifactIntent("pdfs")).toBeNull();
+      expect(detectArtifactIntent("the pdf")).toBeNull();
+      expect(detectArtifactIntent("i opened a pdf yesterday")).toBeNull();
+    });
+
+    it("classifies a real message from the dev database", () => {
+      // "pdf abou the the pyton" \— sent by an actual user, produced nothing. Two slips
+      // at once: a clipped "about", and a noun-led request with no verb.
+      expect(detectArtifactIntent("pdf abou the the pyton")?.type).toBe("pdf");
+    });
+  });
+
+  describe("a broken file is a report, not an order", () => {
+    it('does not generate from "the pdf export button is broken"', () => {
+      // The only false positive in the validation set. "export" sits in the delivery
+      // list, where it reads as a verb; here it modifies "button".
+      expect(detectArtifactIntent("the pdf export button is broken")).toBeNull();
+    });
+
+    it("an explicit ask still overrides the report", () => {
+      // MUTATION GUARD for the override. Without it, asking for a replacement while
+      // saying why is silently downgraded to chat.
+      expect(detectArtifactIntent("the pdf is broken, give me a new one")?.type).toBe("pdf");
+    });
+
+    it("only suppresses when the broken thing is a FILE", () => {
+      // MUTATION GUARD. Drop the format-noun requirement and this genuine request,
+      // which happens to be about a broken build, stops generating.
+      expect(detectArtifactIntent("make a pdf explaining why the build is broken")?.type).toBe(
+        "pdf"
+      );
     });
   });
 

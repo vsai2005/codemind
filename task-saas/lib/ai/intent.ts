@@ -43,6 +43,10 @@ function normalizeForIntent(text: string): string {
       .replace(/\bina\b/g, "in a")
       .replace(/\basa\b/g, "as a")
       .replace(/\bintoa\b/g, "into a")
+      // Observed once, in a real message: "pdf abou the the pyton". n=1, and recorded as
+      // such — but "abou" has no other reading, which is the bar the rest of this
+      // list is held to.
+      .replace(/\babou\b/g, "about")
   );
 }
 
@@ -145,6 +149,87 @@ export interface ArtifactIntent {
 }
 
 /**
+ * Is the PDF the head of the request, or a component of something larger?
+ *
+ * Compares where the user first says "pdf" against where they first name a project or a
+ * set of files. First-mentioned wins, because that is the head noun.
+ *
+ * Returns false when no PDF is named at all, so a plain project request is unaffected.
+ */
+function pdfIsHeadNoun(text: string): boolean {
+  const pdfAt = text.search(PDF_NOUN);
+  if (pdfAt < 0) return false;
+
+  const projectAt = text.search(PROJECT_NOUN);
+  const filesAt = text.search(MULTI_FILE);
+  const subjectAt = Math.min(
+    projectAt < 0 ? Number.POSITIVE_INFINITY : projectAt,
+    filesAt < 0 ? Number.POSITIVE_INFINITY : filesAt
+  );
+  return pdfAt < subjectAt;
+}
+
+/**
+ * A politeness marker, a desire frame, or noun-initial position: the signals that
+ * separate "pdf please" (a request) from "the pdf was corrupted" (a report).
+ *
+ * The standing decision treated the bare noun as the ONLY available signal and rejected
+ * a rule built on it, correctly — any rule broad enough to catch "pdf please" on the
+ * noun alone also catches "pdf", "pdfs" and "the pdf was corrupted". But the noun is not
+ * the only signal. An independent validation set put SIX misses in this one class,
+ * including a message a real user actually sent.
+ *
+ * All three are paired with the ABSENCE of a question word below, because "can you
+ * please explain what a pdf is" carries a politeness marker and is still a question.
+ */
+const POLITE = /\b(?:please|pls|plz)\b/;
+
+/**
+ * "any chance of a pdf", "a pdf would be nice" — asking without an imperative.
+ *
+ * THE DESIRE FRAME MUST TOUCH THE NOUN. An unanchored version of this matched "it would
+ * be nice if the pdf worked", which is a complaint about a file that already exists.
+ * Requiring the pdf to be the subject of the frame, or its object, is what separates
+ * wanting a document from wishing an existing one behaved.
+ */
+const DESIRE =
+  /\b(?:a|an|the)\s+pdfs?\s+would\s+be\b|\bany chance (?:of|for)\s+(?:a|an|the)?\s*pdfs?\b|\bwould love\s+(?:a|an|the)?\s*pdfs?\b/;
+
+/**
+ * The message OPENS with the bare format noun and its subject: "pdf of the retry logic".
+ *
+ * THREE CONSTRAINTS, each one earning its place. Anchored at the start, because a
+ * mid-sentence "a pdf of X" appears in statements too ("i already have the pdf of the
+ * spec"). Requiring a following preposition, which keeps out "the pdf i downloaded is
+ * blank" — that opens with the noun as well, but what follows is a clause about the
+ * file rather than the subject of a document. And NO LEADING ARTICLE: "the pdf of the
+ * spec is attached" is a statement, and dropping the article requirement classified it
+ * as a request. A headline-style bare noun is the shape of an order.
+ */
+const PDF_NOUN_LED = /^\s*pdfs?\s+(?:of|about|on|for|covering|explaining)\b/;
+
+/** A question, however politely phrased, is answered with prose. */
+const QUESTION_WORD = /\b(?:what|why|how|when|where|which|who)\b/;
+
+/**
+ * A state predicate attached to a FILE, which makes the message a report rather than a
+ * request: "the pdf export button is broken", "the zip file was corrupted".
+ *
+ * Requires the subject to be a format noun, deliberately. "make a pdf explaining why the
+ * build is broken" carries the same predicate and is a genuine request — "build" is not
+ * a file, so it does not match here.
+ */
+const FILE_IS_BROKEN =
+  /\b(?:the|this|my|our|that)\s+(?:\w+\s+){0,3}(?:pdfs?|zips?|files?|archives?|documents?|downloads?|exports?)\b[^.?!]{0,30}?\b(?:is|was|are|were)\s+(?:not\s+)?(?:broken|blank|empty|corrupted|failing|failed|wrong|missing|garbled|unreadable)\b/;
+
+/**
+ * An unambiguous request for delivery, as opposed to a bare verb like "export" that is
+ * as often a noun modifier. Used only to let a genuine ask override FILE_IS_BROKEN.
+ */
+const EXPLICIT_ASK =
+  /\b(?:(?:give|send|hand|provide|get|make)\s+(?:me|us|it|this|that|them)\b|(?:give|send|hand)\s+it\s+to\s+(?:me|us)\b|i\s+(?:want|need|would like)\b)/;
+
+/**
  * Classify a user message. Returns null for normal chat.
  */
 export function detectArtifactIntent(rawText: unknown): ArtifactIntent | null {
@@ -178,23 +263,37 @@ export function detectArtifactIntent(rawText: unknown): ArtifactIntent | null {
    */
   if (wantsInline && !wantsDelivery && !explicitPdf && !explicitZip) return null;
 
+  /**
+   * "the pdf export button is broken" was classified as a PDF request, because "export"
+   * sits in the delivery list where it reads as a verb. It is a bug report.
+   *
+   * An explicit ask overrides, so "give me a pdf, the current one is broken" still
+   * generates.
+   */
+  if (FILE_IS_BROKEN.test(text) && !EXPLICIT_ASK.test(text)) return null;
+
   // --- ZIP -----------------------------------------------------------------
   if (ZIP_NOUN.test(text) && (wantsDelivery || PROJECT_NOUN.test(text))) {
     return { type: "zip", reason: "explicit zip request" };
   }
   /**
-   * These two infer ZIP from the SUBJECT ("project", "files"), not from a named format,
-   * so an explicitly named PDF outranks them. "give me a pdf summary of this project"
-   * was returning zip: "project" describes what the document is ABOUT, while "pdf" is
-   * what the user asked to receive.
+   * These two infer ZIP from the SUBJECT ("project", "files") rather than from a named
+   * format, so a PDF the user actually asked FOR outranks them — but only when the
+   * PDF is the thing requested, not a component of the archive.
    *
-   * A message naming BOTH formats never reaches here: the explicit-zip branch above
-   * returns on ZIP_NOUN plus a delivery phrase, and both branches below require that
-   * same delivery phrase. So "zip up the project with a pdf inside" is already a zip,
-   * and an `|| explicitZip` escape hatch here would be unreachable — it was written,
-   * survived mutation testing because nothing could reach it, and was removed.
+   * WHICH IS DECIDED BY WORD ORDER, and that is a general rule rather than a patch.
+   * English puts the head of the phrase first: "a pdf summary OF this project" is a pdf,
+   * "the project WITH a pdf readme inside" is a project. Whichever format-bearing noun
+   * the user names first is the one they are asking to receive.
+   *
+   * MEASURED, against phrasings this module was not written from. The previous version
+   * disabled the ZIP inference whenever the word "pdf" appeared anywhere, which produced
+   * the exact mirror of the bug it fixed: three of four archive requests that merely
+   * MENTIONED a pdf started returning a pdf. The regression was invisible because the
+   * only test covering both formats used a message containing the literal word "zip",
+   * which the explicit-zip branch above catches before this line is reached.
    */
-  const zipInferredFromSubject = !explicitPdf;
+  const zipInferredFromSubject = !pdfIsHeadNoun(text);
 
   if (wantsDelivery && PROJECT_NOUN.test(text) && zipInferredFromSubject) {
     return { type: "zip", reason: "delivery of a whole project" };
@@ -215,7 +314,11 @@ export function detectArtifactIntent(rawText: unknown): ArtifactIntent | null {
       PDF_PRODUCE_VERB.test(text) ||
       // "show me a pdf of the design doc" — a PDF cannot be shown in the conversation,
       // so asking to see one IS asking to be given one.
-      (DISPLAY_REQUEST.test(text) && PDF_AS_OBJECT.test(text)))
+      (DISPLAY_REQUEST.test(text) && PDF_AS_OBJECT.test(text)) ||
+      // A request carrying no verb this gate can match on. Never the bare noun alone:
+      // one of the three signals above must be present, and no question word.
+      (!QUESTION_WORD.test(text) &&
+        (POLITE.test(text) || DESIRE.test(text) || PDF_NOUN_LED.test(text))))
   ) {
     return { type: "pdf", reason: "explicit pdf request" };
   }
