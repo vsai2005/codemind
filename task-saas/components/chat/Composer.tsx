@@ -61,6 +61,19 @@ export function Composer({
    */
   const [uploadError, setUploadError] = useState<Error | null>(null);
   const [failedUploadFile, setFailedUploadFile] = useState<File | null>(null);
+
+  /**
+   * The Enhance suggestion, held SEPARATELY from `input`.
+   *
+   * The rewrite never touches the composer's value until the user accepts it. Writing
+   * it straight into `input` would be a silent substitution: the user would see their
+   * message change under them and could send words they never read. Everything below
+   * keeps the original text live and editable while the suggestion sits beside it.
+   */
+  const [enhancement, setEnhancement] = useState<
+    { status: "enhanced" | "needs-clarification"; text: string; reason?: string } | null
+  >(null);
+  const [enhancing, setEnhancing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
@@ -148,6 +161,56 @@ export function Composer({
   const removeAttachment = (id: string): void => {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   };
+
+  /**
+   * Ask the server to rewrite the draft. Never sends, and never edits `input`.
+   *
+   * A failure is deliberately silent: this is a convenience in front of text the user
+   * already has, so a red banner would be louder than the problem. On any failure the
+   * draft stays exactly as typed and no suggestion appears.
+   */
+  const onEnhance = useCallback(async (): Promise<void> => {
+    const draft = input.trim();
+    if (draft.length === 0 || enhancing || isLoading) return;
+
+    setEnhancing(true);
+    setEnhancement(null);
+    try {
+      const res = await fetch("/api/enhance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: draft }),
+      });
+      if (!res.ok) return;
+
+      const data = (await res.json()) as {
+        status: "enhanced" | "needs-clarification" | "failed";
+        text: string;
+        reason?: string;
+      };
+      // "failed" shows nothing at all: the draft is already correct on screen.
+      if (data.status === "failed") return;
+      setEnhancement({ status: data.status, text: data.text, reason: data.reason });
+    } catch {
+      // Same reasoning as a non-ok response — the draft is untouched either way.
+    } finally {
+      setEnhancing(false);
+    }
+  }, [input, enhancing, isLoading]);
+
+  /** Replace the draft with the suggestion. The user can still edit before sending. */
+  const acceptEnhancement = useCallback((): void => {
+    if (enhancement?.status !== "enhanced") return;
+    handleInputChange(syntheticChange(enhancement.text));
+    setEnhancement(null);
+    textareaRef.current?.focus();
+  }, [enhancement, handleInputChange]);
+
+  /** Dismiss the suggestion. The draft was never modified, so there is nothing to undo. */
+  const discardEnhancement = useCallback((): void => {
+    setEnhancement(null);
+    textareaRef.current?.focus();
+  }, []);
 
   const onSubmit = (e: React.FormEvent<HTMLFormElement>): void => {
     e.preventDefault();
@@ -247,6 +310,60 @@ export function Composer({
           />
         </div>
 
+        {enhancement !== null && (
+          /**
+           * The suggestion, shown BELOW the live draft and visibly separate from it.
+           * Nothing here has changed the composer's contents; Accept is the only thing
+           * that does, and Send is not reachable from this panel.
+           */
+          <div
+            className="mx-3.5 mt-2 rounded-lg border border-accent-200 bg-accent-50/60 p-3"
+            role="region"
+            aria-label="Suggested rewrite"
+          >
+            {enhancement.status === "enhanced" ? (
+              <>
+                <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-accent-700">
+                  Suggested rewrite
+                </p>
+                <p className="whitespace-pre-wrap text-[14px] leading-6 text-gray-800">
+                  {enhancement.text}
+                </p>
+                <div className="mt-2.5 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={acceptEnhancement}
+                    className="rounded-lg bg-accent-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-accent-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
+                  >
+                    Use this
+                  </button>
+                  <button
+                    type="button"
+                    onClick={discardEnhancement}
+                    className="rounded-lg px-3 py-1.5 text-xs font-semibold text-gray-600 transition-colors hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
+                  >
+                    Discard
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-600">
+                  Nothing to expand yet
+                </p>
+                <p className="text-[13px] leading-5 text-gray-700">{enhancement.reason}</p>
+                <button
+                  type="button"
+                  onClick={discardEnhancement}
+                  className="mt-2.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-gray-600 transition-colors hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500"
+                >
+                  Dismiss
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
         {/* Action row: stays below the textarea and moves down as it grows. */}
         <div className="flex items-center justify-between gap-2 px-2 pb-2 pt-1.5">
           <input
@@ -273,6 +390,26 @@ export function Composer({
               </svg>
             )}
           </button>
+
+          <button
+            type="button"
+            onClick={onEnhance}
+            disabled={input.trim().length === 0 || enhancing || isLoading}
+            aria-label="Enhance prompt"
+            title="Rewrite this as a clearer request"
+            className="ml-1 rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {enhancing ? (
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-gray-600" />
+            ) : (
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9z" />
+                <path d="M18 15l.9 2.1L21 18l-2.1.9L18 21l-.9-2.1L15 18l2.1-.9z" />
+              </svg>
+            )}
+          </button>
+
+          <div className="flex-1" />
 
           {isLoading && stop ? (
             // While streaming the primary action is cancellation. type="button" so it

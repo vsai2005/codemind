@@ -26,6 +26,14 @@ export interface RateLimitRule {
 export const RATE_LIMITS = {
   /** POST /api/chat — each request may trigger a full model generation. */
   chat: { limit: 20, windowMs: 60_000 },
+  /**
+   * POST /api/enhance — one provider call per click on the composer's Enhance button.
+   *
+   * Higher than `chat` because it is cheaper and more repeatable: a user reasonably
+   * clicks Enhance, discards, edits, and clicks again while drafting one message. Still
+   * bounded, because each click is a real provider request against a shared credential.
+   */
+  enhance: { limit: 30, windowMs: 60_000 },
   /** POST /api/upload — PDF/text parsing is CPU bound. */
   upload: { limit: 30, windowMs: 60_000 },
   /** POST /api/export/* — ZIP/PDF construction. */

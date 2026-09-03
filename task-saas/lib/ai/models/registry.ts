@@ -383,6 +383,61 @@ function buildRegistry(): ModelDescriptor[] {
 
     {
       /**
+       * NOT A CHAT MODEL EITHER. Rewrites a user's draft in the composer, in front of a
+       * click, so it is `internal` and never appears in the picker.
+       *
+       * WHY NOT ising-calibration-1-5, which won the intent-classifier search: that entry
+       * is NVIDIA-hosted and this deployment has no NVIDIA key, so it cannot serve. The
+       * same evaluation was re-run against OpenRouter, the only configured provider.
+       *
+       * FIRST SEARCH FOUND NOTHING USABLE, and the reason was the prompt rather than the
+       * models. Asking a small model to also judge "is this too sparse to rewrite"
+       * produced two failure modes and no successes: qwen-2.5-7b answered
+       * NEEDS_CLARIFICATION to everything, which is vacuously safe and useless, and
+       * ministral-3b invented "PDF file with embedded metadata (author, title, creation
+       * date)" from the two words "give pdf".
+       *
+       * With that judgment moved into code, where it is deterministic and cannot
+       * fabricate, all four candidates produced usable rewrites with zero invented
+       * subjects. Measured over four requests:
+       *
+       * CHOSEN ON WORST CASE, not average, because this sits under a spinner the user is
+       * watching and the number they feel is the slow one. Four samples each, same
+       * prompt, after a first four-request pass picked the wrong model on too small a
+       * sample:
+       *
+       *   mistralai/ministral-3b-2512        p50   572ms  max   585ms   [561,566,572,585]
+       *   qwen/qwen-2.5-7b-instruct          p50   679ms  max   797ms   [631,665,679,797]
+       *   openai/gpt-4.1-nano                p50  1010ms  max  1032ms
+       *   meta-llama/llama-3.2-3b-instruct   p50  1134ms  max  1419ms
+       *   meta-llama/llama-3.1-8b-instruct   p50  3144ms  max  3227ms   [857,...,3227]
+       *
+       * llama-3.1-8b was the first pick, on a single pass that happened to catch a fast
+       * window at 945ms average. Repeats showed it swinging to 3.2s, and a later raw
+       * probe caught it at 12s. Ministral is four times tighter at worst case and barely
+       * moves across samples, which is what a synchronous action needs.
+       *
+       * Its one measured flaw is a "Rewrite:" prefix it sometimes emits despite being
+       * told not to; the enhancer strips that, and a leading label is a far cheaper
+       * problem than a three-second wait.
+       */
+      id: "ministral-3b",
+      displayName: "Ministral 3B",
+      provider: "openrouter",
+      providerLabel: "OpenRouter",
+      providerModelId:
+        process.env.CODEMIND_ENHANCER_PROVIDER_MODEL || "mistralai/ministral-3b-2512",
+      providerContextTokens: 131_072,
+      maxOutputTokens: 4_096,
+      supportsStreaming: true,
+      supportsVision: false,
+      strengths: ["Rewriting"],
+      enabled: true,
+      internal: true,
+    },
+
+    {
+      /**
        * NOT A CHAT MODEL. This exists to answer one routing question in a few hundred
        * milliseconds, and `internal` keeps it out of the picker and out of the default.
        *
