@@ -1,5 +1,10 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { withReasoningBudget, reasoningEffort } from "@/lib/ai/openrouter-reasoning";
+import {
+  withReasoningBudget,
+  reasoningEffortOverride,
+  reasoningMaxTokens,
+  DEFAULT_REASONING_MAX_TOKENS,
+} from "@/lib/ai/openrouter-reasoning";
 
 /**
  * Bounding the reasoning pass on OpenRouter.
@@ -9,13 +14,15 @@ import { withReasoningBudget, reasoningEffort } from "@/lib/ai/openrouter-reason
  *
  *   no reasoning field, max_tokens 2000 -> reasoning_tokens 1999, content 0 chars
  *   no reasoning field, max_tokens 8000 -> reasoning_tokens 8000, content 0 chars
- *   reasoning {effort:"low"}            -> reasoning_tokens    0, content 3366 chars
+ *   reasoning {max_tokens:512}          -> reasoning_tokens    0, content 5154 chars
  *
  * The model spends its whole completion budget thinking and returns an empty string, and
- * a bigger budget is simply eaten too. Disabling is refused by the provider
- * (400 "Reasoning is mandatory for this endpoint"), so constraining it is the only lever.
+ * a bigger budget is eaten too. Disabling is refused by the provider (400 "Reasoning is
+ * mandatory for this endpoint"), so constraining it is the only lever.
  *
- * Bodies below are LITERAL JSON, shaped the way the AI SDK writes them.
+ * Bodies below are LITERAL JSON, shaped the way the AI SDK writes them. The 512 is
+ * written out rather than read from the constant: a fixture derived from the value it
+ * checks moves with a mutation of it and proves nothing.
  */
 
 const body = (o: Record<string, unknown>): RequestInit => ({ body: JSON.stringify(o) });
@@ -24,42 +31,108 @@ const parse = (init: RequestInit | undefined): Record<string, unknown> =>
 
 afterEach(() => {
   delete process.env.OPENROUTER_REASONING_EFFORT;
+  delete process.env.OPENROUTER_REASONING_MAX_TOKENS;
 });
 
-describe("choosing the effort", () => {
-  it("defaults to low, which measured zero reasoning tokens", () => {
-    expect(reasoningEffort()).toBe("low");
+describe("the lever that ships", () => {
+  it("sends a hard token cap by default, not an effort hint", () => {
+    /**
+     * THE DECISION THIS PINS. Both levers zeroed reasoning_tokens, so the choice was
+     * made on the real path: `effort` produced the only run that hit the 180s deadline
+     * on single-debounce, and a cap is a number the provider must honour where "low" is
+     * a hint each model reads differently.
+     */
+    const out = parse(withReasoningBudget(body({ model: "z-ai/glm-5.3-flash", max_tokens: 16000 })));
+
+    expect(out.reasoning).toEqual({ max_tokens: 512 });
   });
 
-  it("accepts the documented values", () => {
-    for (const v of ["low", "medium", "high", "off"]) {
-      process.env.OPENROUTER_REASONING_EFFORT = v;
-      expect(reasoningEffort()).toBe(v);
+  it("ships the measured default rather than an arbitrary number", () => {
+    expect(DEFAULT_REASONING_MAX_TOKENS).toBe(512);
+    expect(reasoningMaxTokens()).toBe(512);
+  });
+
+  it("lets the number be overridden", () => {
+    process.env.OPENROUTER_REASONING_MAX_TOKENS = "2048";
+
+    expect(reasoningMaxTokens()).toBe(2048);
+    expect(parse(withReasoningBudget(body({ model: "m" }))).reasoning).toEqual({
+      max_tokens: 2048,
+    });
+  });
+
+  it("ignores a nonsense cap rather than sending it", () => {
+    // A value the provider would reject must not leave this process. Falling back to the
+    // measured default keeps a typo from turning into a 400 on every request.
+    for (const v of ["0", "-5", "", "lots", "3.7"]) {
+      process.env.OPENROUTER_REASONING_MAX_TOKENS = v;
+      expect(reasoningMaxTokens()).toBe(512);
     }
   });
 
-  it("falls back to low for anything else", () => {
-    // A typo must not silently send an invalid value the provider would 400 on.
+  it("rejects a number with trailing rubbish rather than reading the prefix", () => {
+    /**
+     * MUTATION GUARD for the STRICT parse specifically. `Number.parseInt("1024abc", 10)`
+     * is 1024 — a plausible-looking cap assembled from a typo, large enough to clear the
+     * floor, so nothing else in this file would notice it shipping.
+     */
+    process.env.OPENROUTER_REASONING_MAX_TOKENS = "1024abc";
+
+    expect(reasoningMaxTokens()).toBe(512);
+  });
+
+  it("rejects a cap too small to hold a thought", () => {
+    /**
+     * MUTATION GUARD for the FLOOR specifically. "3" parses cleanly under any strategy —
+     * it is an integer and it is positive — so only the floor rejects it. A three-token
+     * reasoning budget produces the same empty output this module exists to prevent.
+     */
+    process.env.OPENROUTER_REASONING_MAX_TOKENS = "3";
+
+    expect(reasoningMaxTokens()).toBe(512);
+  });
+});
+
+describe("the effort escape hatch", () => {
+  it("is null unless explicitly set to a recognised value", () => {
+    /**
+     * MUTATION GUARD, and the distinction the whole default rests on. If "unset"
+     * resolved to "low" the way an earlier version did, the measured default could
+     * never be reached and the losing lever would ship silently.
+     */
+    expect(reasoningEffortOverride()).toBeNull();
+
     for (const v of ["", "LOWEST", "0", "true", "  "]) {
       process.env.OPENROUTER_REASONING_EFFORT = v;
-      expect(reasoningEffort()).toBe("low");
+      expect(reasoningEffortOverride()).toBeNull();
     }
+  });
+
+  it("replaces the cap when set to an effort", () => {
+    process.env.OPENROUTER_REASONING_EFFORT = "high";
+    const out = parse(withReasoningBudget(body({ model: "m" })));
+
+    expect(out.reasoning).toEqual({ effort: "high" });
   });
 
   it("is case- and whitespace-insensitive", () => {
     process.env.OPENROUTER_REASONING_EFFORT = "  HIGH ";
 
-    expect(reasoningEffort()).toBe("high");
+    expect(reasoningEffortOverride()).toBe("high");
+  });
+
+  it("sends no reasoning field at all when set to off", () => {
+    /**
+     * MUTATION GUARD, and the reason "off" exists: it restores the provider's own
+     * behaviour so the empty-output failure can be reproduced without editing code.
+     */
+    process.env.OPENROUTER_REASONING_EFFORT = "off";
+
+    expect(parse(withReasoningBudget(body({ model: "m", max_tokens: 100 }))).reasoning).toBeUndefined();
   });
 });
 
-describe("adding the budget to a request", () => {
-  it("injects the effort into a normal completion body", () => {
-    const out = parse(withReasoningBudget(body({ model: "z-ai/glm-5.3-flash", max_tokens: 16000 })));
-
-    expect(out.reasoning).toEqual({ effort: "low" });
-  });
-
+describe("editing the request safely", () => {
   it("leaves every other field alone", () => {
     // MUTATION GUARD. Rebuilding the body must not drop what the SDK put there — losing
     // `messages` or `max_tokens` would be a far worse bug than the one being fixed.
@@ -76,20 +149,9 @@ describe("adding the budget to a request", () => {
   });
 
   it("does not overrule a caller that set reasoning itself", () => {
-    const out = parse(withReasoningBudget(body({ model: "m", reasoning: { max_tokens: 512 } })));
+    const out = parse(withReasoningBudget(body({ model: "m", reasoning: { effort: "high" } })));
 
-    expect(out.reasoning).toEqual({ max_tokens: 512 });
-  });
-
-  it("sends nothing when the effort is off", () => {
-    /**
-     * MUTATION GUARD, and the reason "off" exists: it restores the provider's own
-     * behaviour so the measurement above can be reproduced without editing code.
-     */
-    process.env.OPENROUTER_REASONING_EFFORT = "off";
-    const init = body({ model: "m", max_tokens: 100 });
-
-    expect(parse(withReasoningBudget(init)).reasoning).toBeUndefined();
+    expect(out.reasoning).toEqual({ effort: "high" });
   });
 });
 
