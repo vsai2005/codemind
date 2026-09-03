@@ -196,4 +196,149 @@ describe("detectArtifactIntent", () => {
       });
     }
   });
+  /**
+   * MEASURED FAILURES, not imagined ones.
+   *
+   * The reported symptom was "sometimes it creates a PDF and sometimes it doesn't".
+   * Twenty-two ordinary phrasings were run through the detector and SIX fell through to
+   * plain chat, in three distinct ways. Each group below is one of those causes, and
+   * every string is a phrasing a person would actually type.
+   *
+   * The prompt was never the problem: for these six, generation was never reached.
+   */
+  describe("the phrasings that silently fell through to chat", () => {
+    describe("an explicitly named PDF outranks a ZIP inferred from the subject", () => {
+      it("routes a pdf ABOUT a project to pdf, not zip", () => {
+        // "project" says what the document is about; "pdf" says what to produce.
+        // This returned zip, so the user asked for a PDF and received an archive.
+        expect(detectArtifactIntent("give me a pdf summary of this project")).toEqual({
+          type: "pdf",
+          reason: "explicit pdf request",
+        });
+      });
+
+      it("routes a pdf ABOUT several files to pdf, not zip", () => {
+        expect(detectArtifactIntent("give me a pdf covering all the files")?.type).toBe("pdf");
+      });
+
+      it("still packages a project when no format is named", () => {
+        // The inference is not removed, only outranked. Without the word "pdf" this
+        // must behave exactly as it always did.
+        expect(detectArtifactIntent("give me this project")?.type).toBe("zip");
+        expect(detectArtifactIntent("i want all the files")?.type).toBe("zip");
+      });
+
+      it("still packages when the user names BOTH formats", () => {
+        // Naming pdf must not flip a message that also explicitly says zip. This is
+        // decided by the explicit-zip branch, which runs BEFORE the subject-inferred
+        // ones — not by the guard above, which such a message never reaches.
+        expect(detectArtifactIntent("zip up the project with a pdf inside")?.type).toBe("zip");
+        expect(detectArtifactIntent("i want the pdf and the zip")?.type).toBe("zip");
+      });
+    });
+
+    describe('"show me" no longer cancels a format the user named', () => {
+      it("treats show-me plus a named pdf as a request for one", () => {
+        // Returned null. A PDF cannot be rendered inside a chat bubble, so asking to
+        // see one is asking to be given one.
+        expect(detectArtifactIntent("show me a pdf of the design doc")?.type).toBe("pdf");
+      });
+
+      it("treats show-me plus a named zip as a request for one", () => {
+        expect(detectArtifactIntent("show me the zip of the project")?.type).toBe("zip");
+      });
+
+      it("still keeps show-me in the conversation when no format is named", () => {
+        expect(detectArtifactIntent("show me middleware.ts")).toBeNull();
+        expect(detectArtifactIntent("show me a react component")).toBeNull();
+      });
+    });
+
+    describe("the verbs people use to ask for a document", () => {
+      /**
+       * Each phrase is longer than four words and carries NO other signal — no delivery
+       * phrase, no "as a pdf", no "pdf format". The verb is the only thing that can
+       * classify them, so removing one from the list fails its case here.
+       */
+      const byVerbAlone = [
+        "prepare a pdf covering the retry behaviour",
+        "draft a pdf on the caching strategy",
+        "build a pdf report of the test coverage",
+        "compose a pdf with the release notes",
+        "assemble a pdf explaining the auth flow",
+        "put together a pdf of the retry logic",
+      ];
+
+      for (const text of byVerbAlone) {
+        it(`"${text}"`, () => {
+          expect(detectArtifactIntent(text)?.type).toBe("pdf");
+        });
+      }
+    });
+
+    describe("the bare noun stays chat, and that is deliberate", () => {
+      /**
+       * "pdf please" was one of the six measured misses and is NOT fixed here.
+       *
+       * A rule broad enough to catch it — a short message with no interrogative — also
+       * classifies "pdf", "pdfs" and "the pdf was corrupted" as generation requests,
+       * which the suite above already forbids for good reason. Politeness is not
+       * evidence of intent, and this miss degrades gracefully: the model answers and
+       * the user can ask for the download in words.
+       *
+       * Recorded as a test so the trade-off is visible rather than looking like an
+       * oversight.
+       */
+      it("does not generate from the noun plus a politeness marker", () => {
+        expect(detectArtifactIntent("pdf please")).toBeNull();
+      });
+
+      it("does not generate from a passing mention", () => {
+        expect(detectArtifactIntent("the pdf was corrupted")).toBeNull();
+        expect(detectArtifactIntent("i opened a pdf yesterday")).toBeNull();
+      });
+    });
+  });
+
+  describe("a PDF named as the object, not used as an adjective", () => {
+    /**
+     * The narrow rule that lets "show me" through without dragging every sentence
+     * containing the word "pdf" with it. Two signals are required: an article in front,
+     * and an ending behind — the phrase stops, or takes a preposition.
+     *
+     * The first attempt at this used a lookahead listing excluded nouns
+     * (files/documents/readers/viewers) and "show me the pdf parsing code" walked
+     * straight through it. The nouns cannot be enumerated; the shape can.
+     */
+    it("does not fire when pdf modifies a following noun", () => {
+      expect(detectArtifactIntent("show me the pdf parsing code")).toBeNull();
+      expect(detectArtifactIntent("how do i read a pdf file in node")).toBeNull();
+      expect(detectArtifactIntent("display the pdf viewer settings")).toBeNull();
+    });
+
+    it("requires the article", () => {
+      // MUTATION GUARD: drop the leading article and "pdf on" matches here, turning a
+      // question about a settings page into a document generation.
+      expect(detectArtifactIntent("display pdf on the settings page")).toBeNull();
+    });
+
+    it("requires a display request alongside it", () => {
+      // MUTATION GUARD: the object rule is never accepted on its own. A statement that
+      // mentions a PDF asks for nothing.
+      expect(detectArtifactIntent("my colleague already attached a pdf.")).toBeNull();
+    });
+
+    it("pairs with the DISPLAY subset, not with questions", () => {
+      /**
+       * MUTATION GUARD, and a bug this actually caused. Pairing the object rule with
+       * the whole of SHOW_INLINE made "what is a pdf" a document generation — the
+       * question forms in that set ("what is", "how does", "explain how") are answered
+       * with prose, not with a file.
+       */
+      expect(detectArtifactIntent("what is a pdf")).toBeNull();
+      expect(detectArtifactIntent("what is a pdf, roughly")).toBeNull();
+      expect(detectArtifactIntent("explain how a pdf is structured")).toBeNull();
+    });
+  });
+
 });

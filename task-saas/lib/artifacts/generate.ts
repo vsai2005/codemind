@@ -86,6 +86,10 @@ Reply with EXACTLY this structure:
 Markdown body. Use "#", "##", "###" headings, "- " bullets, and \`\`\` fenced code blocks.
 </codemind_artifact>
 
+- Name the file after what the document is ABOUT: a retry-logic write-up is
+  "retry-logic.pdf", an architecture overview is "architecture-overview.pdf".
+- "kebab-case-name.pdf" above is a placeholder showing the attribute's shape. Never emit
+  it, and never reuse a filename from these instructions.
 - Write a complete, self-contained document. Close every code fence you open.
 
 ${COMMON_RULES}`;

@@ -56,6 +56,19 @@ function normalizeForIntent(text: string): string {
 const DELIVERY =
   /\b((?:give|send|hand|provide|get|make)\s+(?:me|us|it|this|that|them)\b|(?:give|send|hand)\s+it\s+to\s+(?:me|us)\b|i\s+(?:want|need|would like)\b|download|downloadable|export|package (?:it|this|them|the)|bundle|zip (?:it|this|them|up)|as an? (?:file|download|zip|pdf|attachment)|i want the files?)\b/;
 
+/**
+ * The subset of SHOW_INLINE that ASKS to be shown a thing, as opposed to asking a
+ * question about one.
+ *
+ * SHOW_INLINE mixes two kinds of phrase. "show me X" and "display X" are imperatives
+ * naming an object the user wants put in front of them; "what is X", "how does X work"
+ * and "explain how X" are questions whose answer is prose. Only the first kind can be
+ * read as "hand me this PDF", which is why the object rule below is paired with this
+ * and not with SHOW_INLINE: pairing it with the whole set turned "what is a pdf" into
+ * a document generation.
+ */
+const DISPLAY_REQUEST = /\b(show me|show the|show us|display|print|paste)\b/;
+
 /** Phrases that mean "render it in the conversation". Suppresses artifact generation. */
 const SHOW_INLINE =
   /\b(show me|show the|show us|display|print|paste|walk me through|teach me|example of|how (?:do|would) i|how does|what(?:'s| is)|explain how)\b/;
@@ -80,9 +93,42 @@ const AS_PDF = /\b(?:as|into|to)\s+(?:an?\s+|the\s+)?pdf\b/;
 const IN_PDF =
   /\b(?:in|inside|within)\s+(?:an?\s+|the\s+)?pdf\b(?!\s+(?:files?|documents?|readers?|viewers?|format\s+the))/;
 
+/**
+ * A PDF as the OBJECT of the sentence: "a pdf of the design doc", "the pdf".
+ *
+ * The distinction that makes "show me" safe to honour: is the PDF the thing being
+ * asked for, or a word describing something else?
+ *
+ * TWO SIGNALS, BOTH REQUIRED. An article in front ("a pdf", "the pdf") — because
+ * "explain how text is stored in pdf files" uses the bare noun adjectivally. And an
+ * ENDING behind it: the phrase either stops there, or takes a preposition, because a
+ * document someone wants is "a pdf" or "a pdf OF the design doc", while an adjectival
+ * use is always followed by the noun it modifies — "the pdf PARSING CODE", "a pdf FILE",
+ * "the pdf LIBRARY".
+ *
+ * MEASURED, and the reason this is not a lookahead listing noun exclusions: the first
+ * attempt excluded files/documents/readers/viewers and "show me the pdf parsing code"
+ * walked straight through it. You cannot enumerate the nouns; you can recognise the
+ * shape.
+ *
+ * Paired with SHOW_INLINE below rather than accepted on its own, because a bare mention
+ * of "the pdf" in a sentence that asks for nothing is not a request.
+ */
+const PDF_AS_OBJECT =
+  /\b(?:a|an|the|one)\s+(?:\w+\s+){0,2}pdf\b(?:\s+(?:of|about|on|for|with|covering|containing|explaining|summari[sz]ing|version|instead|please)\b|\s*[.,!?]|\s*$)/;
+
 /** "in pdf format", "pdf format please" — a format request, not a passing mention. */
 const PDF_FORMAT = /\bpdf\s+format\b/;
-const PDF_PRODUCE_VERB = /\b(export|generate|create|make|write|turn|produce|render|convert)\b/;
+/**
+ * Verbs that mean "bring a document into existence".
+ *
+ * EXTENDED after measurement: "prepare", "draft", "build", "compose", "assemble" and
+ * "put together" were all missing, and each one is an ordinary way to ask. Measured on
+ * twenty-two realistic phrasings, they accounted for three of six misses — requests
+ * that named a PDF explicitly and still fell through to plain chat.
+ */
+const PDF_PRODUCE_VERB =
+  /\b(export|generate|create|make|write|turn|produce|render|convert|prepare|draft|build|compose|assemble|put together)\b/;
 
 const SCRIPT_NOUN = /\b(scripts?|files?|components?|modules?)\b/;
 
@@ -110,18 +156,50 @@ export function detectArtifactIntent(rawText: unknown): ArtifactIntent | null {
   const wantsDelivery = DELIVERY.test(text);
   const wantsInline = SHOW_INLINE.test(text);
 
-  // "Show me middleware.ts" / "Show me a React component" stay in the conversation.
-  // An explicit delivery phrase overrides ("show me the zip and give me the file").
-  if (wantsInline && !wantsDelivery) return null;
+  /**
+   * Did the user NAME a format, rather than leaving it to be inferred?
+   *
+   * This is the difference between "the deliverable I asked for" and "a noun that
+   * happens to appear". It decides two things below, both of which were measured
+   * failures: whether "show me" suppresses the request, and whether the ZIP branch is
+   * allowed to claim a message that says "pdf".
+   */
+  const explicitPdf = PDF_NOUN.test(text);
+  const explicitZip = ZIP_NOUN.test(text);
+
+  /**
+   * "Show me middleware.ts" / "Show me a React component" stay in the conversation.
+   *
+   * BUT NOT WHEN A FORMAT IS NAMED. "show me a pdf of the design doc" was falling
+   * through to chat: the user asked for a file in so many words, and a phrase meaning
+   * "render it here" was overriding the format they had explicitly requested. You
+   * cannot show someone a PDF inside a chat bubble, so naming one IS the delivery
+   * request.
+   */
+  if (wantsInline && !wantsDelivery && !explicitPdf && !explicitZip) return null;
 
   // --- ZIP -----------------------------------------------------------------
   if (ZIP_NOUN.test(text) && (wantsDelivery || PROJECT_NOUN.test(text))) {
     return { type: "zip", reason: "explicit zip request" };
   }
-  if (wantsDelivery && PROJECT_NOUN.test(text)) {
+  /**
+   * These two infer ZIP from the SUBJECT ("project", "files"), not from a named format,
+   * so an explicitly named PDF outranks them. "give me a pdf summary of this project"
+   * was returning zip: "project" describes what the document is ABOUT, while "pdf" is
+   * what the user asked to receive.
+   *
+   * A message naming BOTH formats never reaches here: the explicit-zip branch above
+   * returns on ZIP_NOUN plus a delivery phrase, and both branches below require that
+   * same delivery phrase. So "zip up the project with a pdf inside" is already a zip,
+   * and an `|| explicitZip` escape hatch here would be unreachable — it was written,
+   * survived mutation testing because nothing could reach it, and was removed.
+   */
+  const zipInferredFromSubject = !explicitPdf;
+
+  if (wantsDelivery && PROJECT_NOUN.test(text) && zipInferredFromSubject) {
     return { type: "zip", reason: "delivery of a whole project" };
   }
-  if (wantsDelivery && MULTI_FILE.test(text)) {
+  if (wantsDelivery && MULTI_FILE.test(text) && zipInferredFromSubject) {
     return { type: "zip", reason: "delivery of multiple files" };
   }
 
@@ -134,7 +212,10 @@ export function detectArtifactIntent(rawText: unknown): ArtifactIntent | null {
       AS_PDF.test(text) ||
       IN_PDF.test(text) ||
       PDF_FORMAT.test(text) ||
-      PDF_PRODUCE_VERB.test(text))
+      PDF_PRODUCE_VERB.test(text) ||
+      // "show me a pdf of the design doc" — a PDF cannot be shown in the conversation,
+      // so asking to see one IS asking to be given one.
+      (DISPLAY_REQUEST.test(text) && PDF_AS_OBJECT.test(text)))
   ) {
     return { type: "pdf", reason: "explicit pdf request" };
   }
