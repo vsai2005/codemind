@@ -764,12 +764,32 @@ export async function POST(req: Request): Promise<Response> {
        * from the conversation alone and sounds exactly as confident as it would with
        * the files in front of it.
        */
-      if (selection.loadFailed) {
+      if (selection.loadFailed || selection.fetchFailed === true) {
         repositoryNoteKind = "unavailable";
+        /**
+         * TWO WAYS TO HAVE NO SOURCE, one note, and the difference is stated inside it.
+         *
+         * `loadFailed` never reached the index. `fetchFailed` matched the right files
+         * and could not download them. Both leave the model with nothing, so both take
+         * the "unavailable" header -- but the second used to be filed under "no file
+         * matched", whose note asks the model to name a different file or symbol. That
+         * is exactly the wrong instruction when the matching already worked: it sends
+         * the user looking for a better question to a problem that was never about the
+         * question.
+         *
+         * The added sentence is why the two are not split into separate kinds: a reader
+         * needs to know whether trying again is worth anything, and one clause carries
+         * that without a third header to keep in step.
+         */
         repositoryNote =
-          "The repository attached to this project could not be read for this message, " +
-          "so none of its source is available here. Say so plainly before answering, " +
-          "and do not describe the repository's code as though you had seen it.";
+          (selection.fetchFailed === true
+            ? "The repository attached to this project was searched and the right files " +
+              "were identified, but they could not be downloaded for this message, so " +
+              "none of its source is available here. This is usually temporary. "
+            : "The repository attached to this project could not be read for this " +
+              "message, so none of its source is available here. ") +
+          "Say so plainly before answering, and do not describe the repository's code " +
+          "as though you had seen it.";
       } else if (selection.files.length === 0) {
         repositoryNoteKind = "no-match";
         repositoryNote =
@@ -1779,6 +1799,16 @@ export interface RepositorySelection {
    * nor the knowledge that files are missing sounds exactly as confident either way.
    */
   loadFailed: boolean;
+  /**
+   * An empty selection where the files WERE chosen and then could not be downloaded.
+   *
+   * A THIRD FACT, not a shade of the other two. `loadFailed` means the index was never
+   * read; a plain empty selection means it was read and nothing matched. This one means
+   * matching worked and the network did not, which the user needs told differently:
+   * the "nothing matched" note asks the model to name a different file or symbol, and
+   * that is precisely the wrong advice when the right files were already identified.
+   */
+  fetchFailed?: boolean;
 }
 
 async function loadRepositoryFiles(params: {
@@ -1840,7 +1870,9 @@ async function loadRepositoryFiles(params: {
     const empty = (
       reason: string,
       counts: { candidates: number; scored: number; chosen: number; fetched: number },
-      graph: GraphCoverage = "not-indexed"
+      graph: GraphCoverage = "not-indexed",
+      /** Set when files were chosen and the DOWNLOAD failed, not the matching. */
+      fetchFailed = false
     ): RepositorySelection => {
       logger.warn("Repository attached but no files reached the model", {
         repositoryId: repository.id,
@@ -1851,8 +1883,9 @@ async function loadRepositoryFiles(params: {
         ...counts,
       });
       // An empty selection, not a failed one. The repository WAS read; nothing in it
-      // was worth putting in front of the model this turn.
-      return { files: [], graph, graphFiles: 0, loadFailed: false };
+      // was worth putting in front of the model this turn -- unless `fetchFailed`, in
+      // which case the right files were found and the download is what broke.
+      return { files: [], graph, graphFiles: 0, loadFailed: false, fetchFailed };
     };
 
     if (indexed.length === 0) {
@@ -2119,7 +2152,9 @@ async function loadRepositoryFiles(params: {
             chosen: chosen.length,
             fetched: 0,
           },
-          graph
+          graph,
+          // The files were chosen; downloading them is what failed.
+          true
         );
   } catch (error) {
     /**

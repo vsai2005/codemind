@@ -49,10 +49,36 @@ describe("the model is registered", () => {
     expect(d().providerLabel).toBe("OpenRouter");
   });
 
-  it("does not displace the house default", () => {
-    // Order is meaningful in this registry: getDefaultModelId walks it and takes the
-    // first configured entry. A new model must not silently become everyone's default.
-    expect(getDefaultModelId()).not.toBe(ID);
+  it("becomes the default when OpenRouter is the only configured provider", () => {
+    /**
+     * THE BUG THIS PINS, reproduced live: with NVIDIA and Google unconfigured,
+     * getDefaultModelId returned inkling-small, which OpenRouter refuses for this
+     * account ("only available on agentic harnesses"). Every new chat defaulted to a
+     * model that cannot answer, and every send returned "An error occurred during chat
+     * processing".
+     *
+     * Order is the fallback chain, so this asserts the chain lands somewhere that
+     * works rather than merely somewhere configured.
+     */
+    expect(getDefaultModelId()).toBe(ID);
+  });
+
+  it("never defaults to a model that is not selectable", () => {
+    // MUTATION GUARD, stated as the general property rather than the specific model:
+    // a comingSoon entry is one the deployment already knows cannot serve.
+    const chosen = getModelDescriptor(getDefaultModelId());
+
+    expect(chosen?.comingSoon).not.toBe(true);
+    expect(chosen?.internal).not.toBe(true);
+  });
+
+  it("keeps the account-restricted model listed but unselectable", () => {
+    // Listed, so the capability is visible and greyed out; not selectable, because
+    // OpenRouter refuses it for this account regardless of key.
+    const inkling = getModelDescriptor("inkling-small");
+
+    expect(inkling?.enabled).toBe(true);
+    expect(inkling?.comingSoon).toBe(true);
   });
 });
 

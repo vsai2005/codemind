@@ -292,6 +292,73 @@ function buildRegistry(): ModelDescriptor[] {
       supportsVision: true,
       strengths: ["Long Context", "Coding", "Reasoning"],
       enabled: true,
+      /**
+       * LISTED BUT NOT SELECTABLE. OpenRouter refuses this model for this account:
+       *
+       *   thinkingmachines/inkling-small:free is only available on agentic harnesses.
+       *
+       * That is a permanent account-level restriction, not a health blip, and it was
+       * breaking every chat: with NVIDIA and Google unconfigured this was the first
+       * entry `getDefaultModelId` found with a configured provider, so new chats
+       * defaulted to a model that cannot answer and every send returned an error.
+       *
+       * comingSoon rather than enabled:false so the capability stays visible and
+       * greyed out, which is what that flag is for, and because the restriction is on
+       * the account rather than on the model.
+       */
+      comingSoon: true,
+    },
+
+    {
+      /**
+       * ORDER IS THE FALLBACK CHAIN. `getDefaultModelId` walks this list and takes the
+       * first entry whose provider is configured, so position decides what a deployment
+       * gets when the earlier providers have no keys.
+       *
+       * This entry sits ahead of the Nemotron OpenRouter route deliberately: that one is
+       * a free tier which answers HTTP 200 carrying "Upstream error from Nvidia: Service
+       * temporarily overloaded" often enough to be a poor default, while this is paid and
+       * has answered every probe. A reliable route should outrank a flaky one in a chain
+       * whose whole purpose is to find something that works.
+       */
+      /**
+       * GLM 5.3 Flash, via OpenRouter.
+       *
+       * ID RESOLVED FROM THE CATALOGUE, not from the display name, because this family
+       * is exactly where that goes wrong: the catalogue carries `z-ai/glm-5.3` and
+       * `z-ai/glm-5.3-flash` as different models, plus a `:batch` variant of the flash
+       * and a floating `~z-ai/glm-flash-latest` alias, and all four have different
+       * prices and ceilings. The Inkling entry above was written after the same lesson,
+       * and an earlier OpenRouter entry was deleted outright when its guessed id 404'd.
+       *
+       * CHEAP AND LARGE. At $0.075 per million prompt tokens it is the least expensive
+       * entry in this registry by an order of magnitude, with the largest advertised
+       * context.
+       *
+       * IT REASONS BY DEFAULT, like every other model here, so it is NOT a candidate for
+       * the intent classifier below — that one needs a model which answers in one word
+       * without a thinking pass. This is a chat model.
+       *
+       * Its own env variable, deliberately. OPENROUTER_MODEL is already read by the
+       * Inkling entry, so sharing it would silently repoint both — the exact confusion
+       * that once left an entry labelled "Inkling Small" serving Nemotron.
+       */
+      id: "glm-5-3-flash",
+      displayName: "GLM 5.3 Flash",
+      provider: "openrouter",
+      providerLabel: "OpenRouter",
+      providerModelId: process.env.OPENROUTER_GLM_MODEL || "z-ai/glm-5.3-flash",
+      providerContextTokens: GLM_5_3_FLASH_CONTEXT_TOKENS,
+      maxOutputTokens: GLM_5_3_FLASH_MAX_OUTPUT_TOKENS,
+      supportsStreaming: true,
+      /**
+       * `input_modalities` is ["text","image","video"]. Only the image half is reachable
+       * from CodeMind, since /api/upload accepts images as data URLs and rejects video
+       * outright — so vision here means images, as it does for Gemini and Inkling.
+       */
+      supportsVision: true,
+      strengths: ["Long Context", "Coding", "Reasoning"],
+      enabled: true,
     },
 
     {
@@ -336,47 +403,6 @@ function buildRegistry(): ModelDescriptor[] {
       // OpenRouter lists input_modalities ["text"] for this route — no vision, matching
       // the direct NVIDIA entry.
       supportsVision: false,
-      strengths: ["Long Context", "Coding", "Reasoning"],
-      enabled: true,
-    },
-
-    {
-      /**
-       * GLM 5.3 Flash, via OpenRouter.
-       *
-       * ID RESOLVED FROM THE CATALOGUE, not from the display name, because this family
-       * is exactly where that goes wrong: the catalogue carries `z-ai/glm-5.3` and
-       * `z-ai/glm-5.3-flash` as different models, plus a `:batch` variant of the flash
-       * and a floating `~z-ai/glm-flash-latest` alias, and all four have different
-       * prices and ceilings. The Inkling entry above was written after the same lesson,
-       * and an earlier OpenRouter entry was deleted outright when its guessed id 404'd.
-       *
-       * CHEAP AND LARGE. At $0.075 per million prompt tokens it is the least expensive
-       * entry in this registry by an order of magnitude, with the largest advertised
-       * context.
-       *
-       * IT REASONS BY DEFAULT, like every other model here, so it is NOT a candidate for
-       * the intent classifier below — that one needs a model which answers in one word
-       * without a thinking pass. This is a chat model.
-       *
-       * Its own env variable, deliberately. OPENROUTER_MODEL is already read by the
-       * Inkling entry, so sharing it would silently repoint both — the exact confusion
-       * that once left an entry labelled "Inkling Small" serving Nemotron.
-       */
-      id: "glm-5-3-flash",
-      displayName: "GLM 5.3 Flash",
-      provider: "openrouter",
-      providerLabel: "OpenRouter",
-      providerModelId: process.env.OPENROUTER_GLM_MODEL || "z-ai/glm-5.3-flash",
-      providerContextTokens: GLM_5_3_FLASH_CONTEXT_TOKENS,
-      maxOutputTokens: GLM_5_3_FLASH_MAX_OUTPUT_TOKENS,
-      supportsStreaming: true,
-      /**
-       * `input_modalities` is ["text","image","video"]. Only the image half is reachable
-       * from CodeMind, since /api/upload accepts images as data URLs and rejects video
-       * outright — so vision here means images, as it does for Gemini and Inkling.
-       */
-      supportsVision: true,
       strengths: ["Long Context", "Coding", "Reasoning"],
       enabled: true,
     },

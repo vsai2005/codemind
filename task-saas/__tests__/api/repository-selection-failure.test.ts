@@ -80,6 +80,7 @@ vi.mock("@/lib/repo/github", async (importOriginal) => {
   };
 });
 
+import { fetchFilesInOrder } from "@/lib/repo/github";
 import { POST } from "@/app/api/chat/route";
 import { auth } from "@/auth";
 import { __resetRateLimits } from "@/lib/rate-limit";
@@ -179,6 +180,31 @@ describe("repository selection failure modes", () => {
     // Recorded as a bug report, not as "this repository has no edges".
     expect(log!.graph).toBe("unavailable");
     expect(log!.chosenFromGraph).toBe(0);
+  });
+
+  it("says the files could not be DOWNLOADED, not that nothing matched", async () => {
+    /**
+     * A RECLASSIFICATION, not a new note. all_file_fetches_failed used to be filed
+     * under "no file matched", whose note asks the model to name a different file or
+     * symbol. That is the wrong instruction when matching already worked and the
+     * download is what broke: it sends the user hunting for a better question to a
+     * problem that was never about the question.
+     */
+    vi.mocked(fetchFilesInOrder).mockResolvedValueOnce([
+      { path: "src/retry.ts", content: null, error: "socket hang up" },
+      { path: "src/client.ts", content: null, error: "socket hang up" },
+    ]);
+
+    const res = await POST(chatRequest(QUESTION));
+    await res.text().catch(() => "");
+
+    const prompt = systemPrompt();
+    expect(prompt).toContain("REPOSITORY CONTEXT UNAVAILABLE");
+    expect(prompt).toMatch(/could not be downloaded/i);
+    // The wording that would have been wrong: it must not send the user looking for a
+    // different file when the right ones were already found.
+    expect(prompt).not.toContain("NO FILE MATCHED");
+    expect(prompt).not.toMatch(/name the file or symbol you would need/i);
   });
 
   it("tells the model when the repository could not be read at all", async () => {
