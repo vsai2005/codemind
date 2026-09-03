@@ -206,10 +206,35 @@ export function deadlineFor(init: RequestInit | undefined): number {
 }
 
 /**
- * `fetch`, but give up if the provider has not sent response headers in time.
+ * Statuses the fetch spec forbids a body on. Reconstructing one of these with a body —
+ * even an empty buffer — throws, so they are returned untouched.
+ */
+const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
+
+/**
+ * `fetch`, with a deadline whose MEANING depends on the request shape.
  *
- * A caller-supplied `init.signal` is still honoured: aborting it aborts the request,
- * and it keeps working after the header timer is cleared.
+ * STREAMING: a header budget. Headers arriving means tokens are coming, so the clock
+ * stops there and the body streams for as long as the generation takes.
+ *
+ * NON-STREAMING: a total-request budget, covering the body read as well. This is the
+ * half that was missing, and the assumption that hid it is written two constants above:
+ * that a non-streamed server "writes nothing at all until the entire completion has been
+ * generated and it can send a Content-Length". That is true of some providers and false
+ * of OpenRouter, which returns headers immediately and then takes as long as it likes
+ * over the body. Clearing the timer on headers therefore bounded nothing.
+ *
+ * MEASURED, which is why this is not a theoretical tidy-up: one generateArtifact call
+ * ran 395,342ms against a 180,000ms ceiling and was never aborted. The app had no other
+ * bound, so the caller simply waited.
+ *
+ * The body is buffered rather than wrapped, because for a non-streamed response the body
+ * IS the answer and the SDK reads it whole anyway. Buffering costs nothing here and
+ * keeps the abort path simple: the timer stays armed across the read, so a stall during
+ * the body aborts with the same typed ProviderDeadlineError as a stall before headers,
+ * and the gateway classifies it as "deadline" rather than blaming the key.
+ *
+ * A caller-supplied `init.signal` is still honoured throughout.
  */
 export async function fetchWithHeaderTimeout(
   input: RequestInfo | URL,
@@ -240,10 +265,28 @@ export async function fetchWithHeaderTimeout(
 
   try {
     const response = await fetch(input, { ...init, headers, signal: controller.signal });
-    // Headers are in. Stop the clock so a slow-but-alive generation can stream
-    // for as long as it needs.
+
+    // Headers are in. For a STREAM that is first-byte, so stop the clock and let a
+    // slow-but-alive generation stream for as long as it needs.
+    if (streaming) {
+      cleanup();
+      return response;
+    }
+
+    // Non-streamed: the answer has not arrived yet, only the promise of one. Keep the
+    // clock running across the body read, so the deadline bounds the whole request.
+    if (response.body === null || NULL_BODY_STATUSES.has(response.status)) {
+      cleanup();
+      return response;
+    }
+
+    const buffered = await response.arrayBuffer();
     cleanup();
-    return response;
+    return new Response(buffered, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
   } catch (error) {
     cleanup();
     throw error;

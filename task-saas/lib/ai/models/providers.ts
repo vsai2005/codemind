@@ -3,6 +3,7 @@ import type { LanguageModelV1 } from "ai";
 import { nvidia } from "@/lib/ai/gateway";
 import { configuredKeyCount } from "@/lib/ai/key-scheduler";
 import { fetchWithHeaderTimeout } from "@/lib/ai/fetch-timeout";
+import { withReasoningBudget } from "@/lib/ai/openrouter-reasoning";
 import type { ProviderAdapter, ProviderId } from "./types";
 
 /**
@@ -218,9 +219,15 @@ const openrouterAdapter: ProviderAdapter = {
           "HTTP-Referer": readEnv("OPENROUTER_SITE_URL") ?? "https://github.com/vsai2005/codemind",
           "X-Title": "CodeMind",
         },
-        // Fail fast if the endpoint accepts the connection but never answers. The
-        // deadline now depends on the request shape — see fetch-timeout.ts.
-        fetch: (input, init) => fetchWithHeaderTimeout(input, init),
+        /**
+         * Fail fast if the endpoint accepts the connection but never answers, and bound
+         * the reasoning pass before the request leaves.
+         *
+         * The reasoning budget is OpenRouter-only and measured: GLM 5.3 Flash spends its
+         * whole completion budget thinking and returns an empty string otherwise. See
+         * openrouter-reasoning.ts for the numbers and for why disabling is not an option.
+         */
+        fetch: (input, init) => fetchWithHeaderTimeout(input, withReasoningBudget(init)),
       });
     }
 

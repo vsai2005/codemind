@@ -29,7 +29,7 @@ import { prisma } from "@/lib/db";
 import { generateArtifact } from "@/lib/artifacts/generate";
 import { buildArtifactBytes } from "@/lib/artifacts/build";
 import { attemptFromReport } from "@/lib/artifacts/verify";
-import { resolveModel, getDefaultModelId } from "@/lib/ai/models/registry";
+import { resolveModel, listModels } from "@/lib/ai/models/registry";
 import { getArtifactOutputTokenLimit } from "@/lib/env";
 import { estimateTokens } from "@/lib/ai/context-manager";
 import type { ArtifactType } from "@/lib/artifacts/types";
@@ -103,15 +103,53 @@ function arg(name: string, fallback: string): string {
   return hit ? hit.slice(name.length + 3) : fallback;
 }
 
+/**
+ * The model must be NAMED, and the registry must hand back the one that was named.
+ *
+ * TWO WAYS THIS RUN HAS ALREADY BEEN MISATTRIBUTED, both silent:
+ *
+ *   - No --model meant getDefaultModelId(), which returns whichever entry happens to be
+ *     first with a configured provider. On this deployment that is `inkling-small`,
+ *     which OpenRouter refuses for this account. A run would have measured a model
+ *     nobody chose and, on an earlier occasion, a different provider entirely.
+ *   - `tsx scripts/measure-artifacts.ts` loaded no environment at all, so every key was
+ *     absent and resolution fell through to whatever was configured by accident.
+ *
+ * A measurement attributed to the wrong model is worse than no measurement, because it
+ * looks like data. So this refuses to start rather than guessing, and prints the exact
+ * provider model id every figure will belong to.
+ */
+function requireNamedModel(modelId: string): ReturnType<typeof resolveModel> {
+  if (!modelId) {
+    const choices = listModels().map((m) => m.id).join(", ");
+    throw new Error(
+      `--model is required; a measurement must name what it measured. Available: ${choices}`
+    );
+  }
+
+  const resolved = resolveModel(modelId);
+
+  // Belt and braces: the registry is expected to return what it was asked for, and a
+  // future alias or fallback that quietly substituted something else would otherwise
+  // reach the report as if it were the requested model.
+  if (resolved.descriptor.id !== modelId) {
+    throw new Error(
+      `asked for "${modelId}" but the registry resolved "${resolved.descriptor.id}"`
+    );
+  }
+
+  return resolved;
+}
+
 async function main(): Promise<void> {
-  const modelId = arg("model", getDefaultModelId());
+  const modelId = arg("model", "");
   const arms = arg("arms", "A,B").split(",");
   const only = arg("only", "");
   const outDir = arg("out", join(process.cwd(), ".measure", String(Date.now())));
   const maxAttempts = Number(arg("attempts", "4"));
 
   mkdirSync(outDir, { recursive: true });
-  const resolved = resolveModel(modelId);
+  const resolved = requireNamedModel(modelId);
   const cases = only ? CASES.filter((c) => c.label.includes(only)) : CASES;
 
   const user = await prisma.user.findFirst({ select: { id: true } });
@@ -123,6 +161,11 @@ async function main(): Promise<void> {
   });
 
   console.log(`model=${modelId} cases=${cases.length} arms=${arms.join(",")} out=${outDir}`);
+  // Printed so the run log itself carries the attribution, not just this terminal.
+  console.log(
+    `provider=${resolved.descriptor.provider} providerModelId=${resolved.descriptor.providerModelId} ` +
+      `contextTokens=${resolved.effectiveContextTokens} artifactOutputTokens=${getArtifactOutputTokenLimit()}`
+  );
   console.log(`conversation=${conversation.id}`);
 
   const results: Record<string, unknown>[] = [];

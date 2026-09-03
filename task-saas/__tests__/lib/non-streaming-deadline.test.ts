@@ -278,3 +278,170 @@ describe("the deadline in effect", () => {
     expect(await settled).toContain("30000");
   });
 });
+
+/**
+ * THE HALF THE FIXTURES ABOVE COULD NOT SEE.
+ *
+ * Every case in this file until now stalls at the HEADER stage: `fetch()` itself never
+ * resolves. That shape is bounded correctly and always was. The defect lives one step
+ * later — headers arrive promptly and the BODY takes forever — and no fixture produced
+ * it, so the timer being cleared on headers looked safe.
+ *
+ * MEASURED, on 2026-09-03: one generateArtifact call against OpenRouter ran 395,342ms
+ * under a 180,000ms ceiling and was never aborted. OpenRouter returns headers
+ * immediately for a non-streamed completion, which the constant's own documentation
+ * assumed no provider would do.
+ */
+describe("a slow BODY, not slow headers", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Headers land immediately; the body arrives `ms` later. This is what OpenRouter
+   * actually does, and what no fixture above reproduced.
+   */
+  const fastHeadersSlowBody = (ms: number, payload = "the answer") =>
+    fetchMock.mockImplementation((_input: unknown, init: RequestInit) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(ctrl) {
+          const t = setTimeout(() => {
+            ctrl.enqueue(new TextEncoder().encode(payload));
+            ctrl.close();
+          }, ms);
+          init.signal?.addEventListener("abort", () => {
+            clearTimeout(t);
+            ctrl.error(init.signal?.reason ?? new Error("aborted"));
+          });
+        },
+      });
+      return Promise.resolve(new Response(body, { status: 200 }));
+    });
+
+  const settle = (p: Promise<Response>) =>
+    p.then(
+      async (r) => `resolved:${await r.text()}`,
+      (e: Error) => e.message
+    );
+
+  it("aborts a non-streaming call whose body never finishes", async () => {
+    /**
+     * THE REGRESSION GUARD. 400s is past the 180s completion budget. Before the fix the
+     * timer was already cleared by the time the body started, so this ran to completion
+     * no matter how long it took.
+     */
+    fastHeadersSlowBody(400_000);
+
+    const settled = settle(
+      fetchWithHeaderTimeout("https://example.test/v1/chat/completions", {
+        body: nonStreamingBody,
+      })
+    );
+
+    await vi.advanceTimersByTimeAsync(179_000);
+    expect(await Promise.race([settled, Promise.resolve("pending")])).toBe("pending");
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    const outcome = await settled;
+    expect(outcome).toContain("180000");
+    expect(outcome).not.toContain("resolved");
+  });
+
+  it("still lets a slow-but-finishing body through", async () => {
+    // 120s is inside the 180s budget. The deadline must bound the request, not shorten
+    // it: a generation that is merely slow has to survive.
+    fastHeadersSlowBody(120_000, "complete project");
+
+    const settled = settle(
+      fetchWithHeaderTimeout("https://example.test/v1/chat/completions", {
+        body: nonStreamingBody,
+      })
+    );
+
+    await vi.advanceTimersByTimeAsync(121_000);
+    expect(await settled).toBe("resolved:complete project");
+  });
+
+  it("does NOT bound a streaming body, however long it takes", async () => {
+    /**
+     * MUTATION GUARD, and the property most at risk from this fix. A stream legitimately
+     * emits for minutes; applying the total-request deadline to it would abort healthy
+     * long generations. Headers arriving is the whole signal for that shape.
+     *
+     * 400s is past BOTH budgets, so this passes only if the clock genuinely stopped at
+     * headers for a stream.
+     */
+    fastHeadersSlowBody(400_000, "streamed tokens");
+
+    const settled = settle(
+      fetchWithHeaderTimeout("https://example.test/v1/chat/completions", {
+        body: streamingBody,
+      })
+    );
+
+    await vi.advanceTimersByTimeAsync(401_000);
+    expect(await settled).toBe("resolved:streamed tokens");
+  });
+
+  it("preserves status, statusText and headers across the buffering", async () => {
+    // The non-streaming path rebuilds the Response from a buffer. Anything the caller
+    // reads off it must survive that, or a 429 would arrive looking like a 200.
+    fetchMock.mockResolvedValue(
+      new Response("rate limited", {
+        status: 429,
+        statusText: "Too Many Requests",
+        headers: { "retry-after": "30", "content-type": "text/plain" },
+      })
+    );
+
+    const r = await fetchWithHeaderTimeout("https://example.test/v1/chat/completions", {
+      body: nonStreamingBody,
+    });
+
+    expect(r.status).toBe(429);
+    expect(r.statusText).toBe("Too Many Requests");
+    expect(r.headers.get("retry-after")).toBe("30");
+    expect(await r.text()).toBe("rate limited");
+  });
+
+  it("returns a bodiless response untouched", async () => {
+    // 204 cannot legally carry a body. Rebuilding one with an empty buffer throws, so
+    // the buffering step has to step aside for these.
+    fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
+
+    const r = await fetchWithHeaderTimeout("https://example.test/v1/chat/completions", {
+      body: nonStreamingBody,
+    });
+
+    expect(r.status).toBe(204);
+  });
+
+  it("honours the caller's own signal during the body read", async () => {
+    // The caller going away must still stop the work, and it must not be reported as
+    // our deadline — the gateway tells those two apart to decide whether to blame a key.
+    fastHeadersSlowBody(400_000);
+    const caller = new AbortController();
+
+    const settled = settle(
+      fetchWithHeaderTimeout("https://example.test/v1/chat/completions", {
+        body: nonStreamingBody,
+        signal: caller.signal,
+      })
+    );
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    caller.abort(new Error("caller went away"));
+
+    expect(await settled).toBe("caller went away");
+  });
+});
