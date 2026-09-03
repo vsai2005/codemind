@@ -58,6 +58,31 @@ describe("a name read out of a malformed tag", () => {
     expect(out.artifact?.name).toBe("nodejs-typescript-todo-cli.zip");
   });
 
+  it("is recorded as recovered behind an orphan closing quote", () => {
+    /**
+     * MEASURED, arm B 2026-09-03. Two turns emitted the closing quote of a `name="`
+     * that was never opened, matched no pattern, and fell through to synthesis --
+     * persisting as "project.zip" with the real filename sitting in the tag.
+     */
+    const out = parseArtifactOutput(
+      envelope('<codemind_artifact type="zip" markdown-to-html.zip">')
+    );
+
+    expect(out.artifact?.nameSource).toBe("model-recovered");
+    expect(out.artifact?.name).toBe("markdown-to-html.zip");
+  });
+
+  it("does not fall through to synthesis for that shape", () => {
+    // MUTATION GUARD stated as the consequence rather than the mechanism: the whole
+    // point is that a recoverable name stops being replaced by an invented one.
+    const out = parseArtifactOutput(
+      envelope('<codemind_artifact type="zip" node-prisma-api.zip">')
+    );
+
+    expect(out.artifact?.name).not.toBe("project.zip");
+    expect(out.artifact?.nameSource).not.toBe("synthesized");
+  });
+
   it("is recorded as recovered when the name is emitted twice", () => {
     const out = parseArtifactOutput(
       envelope('<codemind_artifact type="zip" markdown-to-html.zip" name="markdown-to-html.zip">')

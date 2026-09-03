@@ -73,6 +73,15 @@ const ARTIFACT_OPEN_RE = /<codemind_artifact\s+type="([^"]*)"\s+name="([^"]*)"\s
  * in the output -- recovering that would mean INVENTING a filename, which is a different
  * decision and deliberately not taken here.
  *
+ * A TRAILING ORPHAN QUOTE IS TOLERATED TOO:
+ *
+ *   <codemind_artifact type="zip" markdown-to-html.zip">
+ *
+ * the closing quote of a `name="` that was never opened. Measured in arm B on
+ * 2026-09-03: two turns emitted this, matched nothing, and fell through to the
+ * synthesis path -- persisting as "project.zip" while markdown-to-html.zip and
+ * node-prisma-api.zip sat right there in the tag. Both looked like clean passes.
+ *
  * The token must contain a dot, so this matches something filename-shaped rather than
  * any stray word. The extracted name then goes through the same filename validation as
  * a quoted one, so recovery cannot smuggle in something a canonical tag could not.
@@ -99,7 +108,7 @@ const ARTIFACT_OPEN_JUNK_BEFORE_NAME_RE =
   /<codemind_artifact\s+type="([^"]*)"[^>]*?\s+name="([^"]*)"\s*>/i;
 
 const ARTIFACT_OPEN_BARE_NAME_RE =
-  /<codemind_artifact\s+type="([^"]*)"\s+([^\s"'<>=]*\.[^\s"'<>=]*)\s*>/i;
+  /<codemind_artifact\s+type="([^"]*)"\s+([^\s"'<>=]*\.[^\s"'<>=]*)"?\s*>/i;
 
 /**
  * Locate the closing sentinel, case-insensitively, returning offsets into the ORIGINAL
