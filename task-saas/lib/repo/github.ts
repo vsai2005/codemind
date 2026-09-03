@@ -1,4 +1,5 @@
 import { logger } from "@/lib/logger";
+import { fileCacheKey, getCachedFile, setCachedFile } from "@/lib/repo/file-cache";
 
 /**
  * The GitHub REST calls repository ingestion needs. Five, across four functions:
@@ -528,6 +529,15 @@ export async function fetchFileContent(
     .map((segment) => encodeURIComponent(segment))
     .join("/");
 
+  /**
+   * Cached on the way in. A blob at a given path in a given commit is immutable, so a
+   * hit can never be stale — see lib/repo/file-cache.ts for why that makes this safe
+   * without a TTL.
+   */
+  const key = fileCacheKey(ref.owner, ref.name, commitSha, path);
+  const cached = getCachedFile(key);
+  if (cached !== null) return cached;
+
   const response = await githubFetch(
     `/repos/${ref.owner}/${ref.name}/contents/${encoded}?ref=${commitSha}`,
     "application/vnd.github.raw+json"
@@ -540,10 +550,25 @@ export async function fetchFileContent(
   }
 
   const text = await response.text();
+
+  /**
+   * ONLY SUCCESSES ARE CACHED, and the omission is deliberate: every throw above this
+   * point leaves the cache untouched. A 404 can mean a rate limit or a transient edge
+   * failure as easily as a missing file, and remembering one would turn a momentary
+   * blip into a hole that persists for the life of the process.
+   *
+   * The TRUNCATED value is what gets stored when a file is oversized, because that is
+   * what callers receive — caching the full text would hand a later caller more than
+   * the first one got for the same key.
+   */
   if (text.length > MAX_FILE_BYTES) {
     logger.debug("Truncating an oversized repository file", { path, bytes: text.length });
-    return text.slice(0, MAX_FILE_BYTES);
+    const truncated = text.slice(0, MAX_FILE_BYTES);
+    setCachedFile(key, truncated);
+    return truncated;
   }
+
+  setCachedFile(key, text);
   return text;
 }
 
