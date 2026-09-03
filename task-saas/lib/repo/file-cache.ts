@@ -50,17 +50,50 @@ let hits = 0;
 let misses = 0;
 
 /**
- * Cache key for one blob.
+ * A 40-hex SHA-1 or 64-hex SHA-256 object id, and nothing else.
  *
- * The commit SHA is what makes this safe — see the module header. Owner and name are
- * included because two repositories can share a path, and a fork can share a SHA.
+ * Branch names, tags and "HEAD" all resolve differently over time. Anything mutable in
+ * that position turns this cache from safe-by-construction into a stale-content bug
+ * that only appears after someone pushes — silent, delayed, and near-impossible to
+ * reproduce from a report. SHA-256 is accepted because GitHub is migrating to it.
+ */
+const COMMIT_SHA_RE = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/i;
+
+/**
+ * Cache key for one blob, or null when the read must not be cached.
+ *
+ * THE SAFETY OF THIS WHOLE MODULE IS ONE ASSUMPTION: that the sha position holds an
+ * immutable commit id. Every other property follows from it. So it is CHECKED here
+ * rather than documented and hoped for — a caller that passes a branch name gets no
+ * key, and the read goes to GitHub every time instead of being answered from a cache
+ * that can no longer be trusted.
+ *
+ * REFUSES RATHER THAN THROWS, deliberately. A caching concern must never turn a working
+ * request into a failed one: bypassing costs a GitHub call, throwing costs the user
+ * their answer. The error log is what makes it loud, and the tests are what make it
+ * caught before it ships — this is the same shape as the pool-floor guard in
+ * key-scheduler.ts, which also logs and degrades rather than failing the request.
+ *
+ * Owner and name are in the key because two repositories can share a path, and a fork
+ * can share a commit with its upstream.
  */
 export function fileCacheKey(
   owner: string,
   name: string,
   commitSha: string,
   path: string
-): string {
+): string | null {
+  if (!COMMIT_SHA_RE.test(commitSha)) {
+    logger.error("Refusing to cache a repository file under a non-commit ref", {
+      owner,
+      name,
+      // The ref itself, so the offending call site is identifiable. It is a branch or
+      // tag name at this point, not a credential.
+      ref: commitSha,
+      path,
+    });
+    return null;
+  }
   return `${owner}/${name}@${commitSha}:${path}`;
 }
 

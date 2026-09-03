@@ -534,9 +534,15 @@ export async function fetchFileContent(
    * hit can never be stale — see lib/repo/file-cache.ts for why that makes this safe
    * without a TTL.
    */
+  /**
+   * Null means the sha position was not a commit id, so this read is not cacheable —
+   * see fileCacheKey. The fetch below still happens; only the caching is skipped.
+   */
   const key = fileCacheKey(ref.owner, ref.name, commitSha, path);
-  const cached = getCachedFile(key);
-  if (cached !== null) return cached;
+  if (key !== null) {
+    const cached = getCachedFile(key);
+    if (cached !== null) return cached;
+  }
 
   const response = await githubFetch(
     `/repos/${ref.owner}/${ref.name}/contents/${encoded}?ref=${commitSha}`,
@@ -564,11 +570,11 @@ export async function fetchFileContent(
   if (text.length > MAX_FILE_BYTES) {
     logger.debug("Truncating an oversized repository file", { path, bytes: text.length });
     const truncated = text.slice(0, MAX_FILE_BYTES);
-    setCachedFile(key, truncated);
+    if (key !== null) setCachedFile(key, truncated);
     return truncated;
   }
 
-  setCachedFile(key, text);
+  if (key !== null) setCachedFile(key, text);
   return text;
 }
 
