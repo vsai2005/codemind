@@ -868,12 +868,54 @@ export async function POST(req: Request): Promise<Response> {
     /** Set once an edit is going ahead, so the stream backstop knows what to check. */
     let editTargetPath: string | null = null;
 
+    /**
+     * The recent conversation, rendered for the artifact and planning paths.
+     *
+     * THE DEFECT THIS FIXES. `contextBlocks` carries the rolling summary, attachments
+     * and KEYWORD-RETRIEVED earlier turns — it never carries the recent window, which
+     * `buildContext` returns separately as `messages` for the chat stream. Artifact
+     * generation is handed only `contextBlocks`, so a request like "give me in the pdf"
+     * arrived with no subject attached and the generator wrote about PDFs.
+     *
+     * It appeared to work whenever retrieval happened to score the previous turn above
+     * zero, which is exactly the kind of intermittent correctness that reads as a flake:
+     * the same two-message conversation succeeds or fails on whether a keyword from
+     * "give me in the pdf" brushes against the earlier answer. The subject of a
+     * follow-up request must not depend on that.
+     *
+     * Bounded rather than whole. This is a prompt prefix, not the context window: the
+     * last few turns are what a pronoun or a bare "that" can refer to, and older ones
+     * are already represented by the summary and retrieval blocks that follow.
+     */
+    const recentTranscript = ((): string => {
+      const turns = context.messages.slice(-RECENT_TURNS_FOR_ARTIFACT * 2);
+      if (turns.length === 0) return "";
+      const lines = turns
+        .map((m) => {
+          const body = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+          const clipped =
+            body.length > ARTIFACT_TRANSCRIPT_CHARS_PER_MESSAGE
+              ? `${body.slice(0, ARTIFACT_TRANSCRIPT_CHARS_PER_MESSAGE)}…`
+              : body;
+          return `${String(m.role).toUpperCase()}: ${clipped}`;
+        })
+        .join("\n\n");
+      return `\n\n--- CONVERSATION SO FAR ---\n${lines}`;
+    })();
+
+    /**
+     * What the artifact and planning paths read: assembled memory PLUS the recent turns.
+     * The chat stream is untouched — it already receives `context.messages` directly, so
+     * adding them here would duplicate them there.
+     */
+    const contextForGeneration = `${context.contextBlocks}${recentTranscript}`.trim();
+
     // Planning stage. Runs before generation on a small, targeted slice of context —
     // the request plus assembled memory, never the full window. Returns null for
     // trivial asks or on any failure, in which case generation proceeds unplanned.
     const plan = await buildPlan({
       userText,
-      contextBlocks: context.contextBlocks,
+      contextBlocks: contextForGeneration,
       modelId: resolved.descriptor.id,
     });
 
@@ -933,7 +975,7 @@ export async function POST(req: Request): Promise<Response> {
         intent: intent.type,
         promptText: plannedPrompt,
         plan,
-        contextBlocks: context.contextBlocks,
+        contextBlocks: contextForGeneration,
         conversationId: activeConversationId,
         originalRawContent,
         existingSummary,
@@ -1784,6 +1826,19 @@ export type GraphCoverage = "not-indexed" | "unavailable" | "no-contribution" | 
  * rename of stored values.
  */
 export type EntryPointTier = "manifest" | "conventional" | "structural" | "none";
+
+/**
+ * How many recent TURNS reach the artifact and planning prompts.
+ *
+ * Three is what a follow-up can actually refer to: "give me that as a pdf" points at the
+ * last answer, occasionally the one before. Older material is already carried by the
+ * summary and retrieval blocks, and repeating it here would spend the artifact's budget
+ * on context the generator does not need to name a subject.
+ */
+const RECENT_TURNS_FOR_ARTIFACT = 3;
+
+/** Per-message clip inside that transcript, so one long answer cannot crowd out the rest. */
+const ARTIFACT_TRANSCRIPT_CHARS_PER_MESSAGE = 1_500;
 
 export interface RepositorySelection {
   files: Array<{ path: string; content: string }>;

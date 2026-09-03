@@ -526,7 +526,17 @@ export interface BuildContextResult {
   systemPrompt: string;
   /**
    * Conversation memory and retrieved context, without the base persona.
-   * Reused by the artifact pipeline so generation sees the same working context.
+   *
+   * DOES NOT INCLUDE THE RECENT WINDOW. Those turns are returned as `messages`, for the
+   * chat stream to send directly; what lands here is the rolling summary, attachments,
+   * repository files and turns found by KEYWORD RETRIEVAL.
+   *
+   * That distinction was once documented as "reused by the artifact pipeline so
+   * generation sees the same working context", which was not true and hid a real bug:
+   * artifact generation received only this string, so a follow-up like "give me in the
+   * pdf" arrived with no subject unless retrieval happened to score the previous turn
+   * above zero. Callers that need the conversation must add `messages` themselves --
+   * see the artifact path in the chat route.
    */
   contextBlocks: string;
   /**
