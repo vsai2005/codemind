@@ -332,6 +332,54 @@ export function detectArtifactIntent(rawText: unknown): ArtifactIntent | null {
 }
 
 /**
+ * Nouns that name something a user could be handed. Broader than the format nouns
+ * above on purpose: this is not used to CLASSIFY, only to decide whether a message is
+ * worth a second look.
+ */
+const DELIVERABLE_NOUN =
+  /\b(?:pdfs?|zips?|archives?|files?|documents?|downloads?|scripts?|components?|modules?|projects?|repos?|repositories|codebases?|packages?|bundles?)\b/;
+
+/**
+ * Is this a message the rules DECLINED but should not be confident about?
+ *
+ * THE POINT OF THE HYBRID. `detectArtifactIntent` returning null covers two very
+ * different situations: "this is plainly ordinary chat" and "this mentions something
+ * deliverable and matched no rule I happen to have". Only the second is worth paying a
+ * model call for, and the two were previously indistinguishable.
+ *
+ * ASYMMETRIC BY DESIGN. This is only ever consulted where the rules said NO. A message
+ * the rules classified is never escalated, so the model cannot turn a working zip
+ * request into a pdf, cannot contradict a decision the tests pin, and cannot make the
+ * classifier nondeterministic where it is currently deterministic. The model's only
+ * power is to rescue a miss.
+ *
+ * THREE EXCLUSIONS, each one a case the rules are already confident about:
+ *   - no deliverable noun at all, so there is nothing to hand over;
+ *   - a question word, because the answer to a question is prose;
+ *   - a state predicate on a file, because that is a report.
+ * Each is a shape the rules decline for a REASON, as opposed to declining by omission.
+ */
+export function artifactIntentIsUncertain(rawText: unknown): boolean {
+  if (typeof rawText !== "string") return false;
+
+  // Confidently classified already. The model is never asked to second-guess a hit.
+  if (detectArtifactIntent(rawText) !== null) return false;
+
+  const text = normalizeForIntent(rawText);
+  if (text.trim().length === 0) return false;
+
+  if (!DELIVERABLE_NOUN.test(text) && !FILENAME_REF.test(text)) return false;
+  if (QUESTION_WORD.test(text)) return false;
+  if (FILE_IS_BROKEN.test(text)) return false;
+  // "walk me through the zip creation code" -- a request to be told, not handed. Safe
+  // to exclude here precisely because this function only ever sees declined messages:
+  // "show me a pdf of the design doc" is classified by the rules and never arrives.
+  if (SHOW_INLINE.test(text)) return false;
+
+  return true;
+}
+
+/**
  * Verbs that mean "change code that already exists", as opposed to "write me new code".
  *
  * The distinction is the whole classifier. "write a debounce function" is generation

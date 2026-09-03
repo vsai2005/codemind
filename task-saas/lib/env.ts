@@ -54,6 +54,14 @@ export const AI_LIMIT_DEFAULTS = {
   contextMaxTokens: 512_000,
   maxOutputTokens: 16_384,
   artifactMaxOutputTokens: 16_000,
+  /**
+   * Deadline for the model-backed intent second look, which runs in front of the user's
+   * reply. THREE SECONDS is a latency budget, not a generosity budget: the call asks for
+   * one word, and a model that has not produced one word in three seconds is a model
+   * this request should stop waiting for. Failing closed costs nothing but the rules'
+   * own answer.
+   */
+  intentTimeoutMs: 3_000,
 } as const;
 
 /**
@@ -71,6 +79,13 @@ export const AI_LIMIT_BOUNDS = {
   contextMaxTokens: { min: 256, max: 1_048_576 },
   maxOutputTokens: { min: 64, max: 131_072 },
   artifactMaxOutputTokens: { min: 256, max: 32_000 },
+  /**
+   * The ceiling is the guard that matters here, and it is low on purpose. This deadline
+   * sits in front of every escalated message, so an operator who sets it to a minute has
+   * not bought better classification, they have bought a minute of silence before the
+   * reply starts. Turn escalation off instead.
+   */
+  intentTimeoutMs: { min: 500, max: 15_000 },
 } as const;
 
 type AiLimitName = keyof typeof AI_LIMIT_DEFAULTS;
@@ -79,6 +94,7 @@ const AI_LIMIT_ENV_VARS: Record<AiLimitName, string> = {
   contextMaxTokens: "AI_CONTEXT_MAX_TOKENS",
   maxOutputTokens: "AI_MAX_OUTPUT_TOKENS",
   artifactMaxOutputTokens: "AI_ARTIFACT_MAX_OUTPUT_TOKENS",
+  intentTimeoutMs: "CODEMIND_INTENT_TIMEOUT_MS",
 };
 
 interface LimitRead {
@@ -136,6 +152,14 @@ export function getOutputTokenLimit(): number {
  */
 export function getArtifactOutputTokenLimit(): number {
   return readLimit("artifactMaxOutputTokens").value;
+}
+
+/**
+ * Deadline for the model-backed intent second look. See AI_LIMIT_DEFAULTS for why it is
+ * short, and lib/ai/intent-classifier.ts for what happens when it expires.
+ */
+export function getIntentTimeoutMs(): number {
+  return readLimit("intentTimeoutMs").value;
 }
 
 // ---------------------------------------------------------------------------

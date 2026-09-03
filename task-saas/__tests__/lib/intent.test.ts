@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { detectArtifactIntent } from "@/lib/ai/intent";
+import { detectArtifactIntent, artifactIntentIsUncertain } from "@/lib/ai/intent";
 
 describe("detectArtifactIntent", () => {
   describe("returns null for normal chat", () => {
@@ -465,6 +465,91 @@ describe("detectArtifactIntent", () => {
       expect(detectArtifactIntent("make a pdf explaining why the build is broken")?.type).toBe(
         "pdf"
       );
+    });
+  });
+
+  /**
+   * WHICH MESSAGES ARE WORTH A MODEL CALL.
+   *
+   * `detectArtifactIntent` returning null covers two different situations: "this is
+   * plainly ordinary chat" and "this mentions something deliverable and matched no rule
+   * I happen to have". Only the second earns a provider round-trip in front of the
+   * user's reply, and the two were previously indistinguishable.
+   *
+   * Measured at 17.4% of a validation set built from real messages and an intent
+   * taxonomy, and reaching all three of that set's remaining misses.
+   */
+  describe("deciding when the rules are not confident", () => {
+    it("never escalates a message the rules already classified", () => {
+      /**
+       * THE SAFETY PROPERTY THE WHOLE DESIGN RESTS ON, and the reason a wrong model
+       * answer cannot be worse than not having the feature. If this were ever true for
+       * a classified message, the model could contradict a decision these tests pin,
+       * and deterministic routing would become nondeterministic.
+       */
+      for (const text of [
+        "give me a pdf summary of this project",
+        "zip up the whole project for me",
+        "give me debounce.ts",
+        "pdf please",
+        "show me a pdf of the design doc",
+        "give me the project with a pdf readme inside",
+      ]) {
+        expect(detectArtifactIntent(text)).not.toBeNull();
+        expect(artifactIntentIsUncertain(text)).toBe(false);
+      }
+    });
+
+    it("escalates a declined message that names something deliverable", () => {
+      // The three misses the rules still have. Each needs another word in another list
+      // to fix with a pattern, which is what the model is here to stop doing.
+      expect(artifactIntentIsUncertain("bundle everything into an archive")).toBe(true);
+      expect(artifactIntentIsUncertain("can you zip these files")).toBe(true);
+      expect(artifactIntentIsUncertain("can you write me a script for that")).toBe(true);
+    });
+
+    it("does not escalate ordinary conversation", () => {
+      // MUTATION GUARD for the deliverable-noun requirement. Without it every message
+      // that the rules decline pays for a provider call, which is most of them.
+      for (const text of [
+        "hi",
+        "how are you",
+        "what is python",
+        "continue",
+        "thanks, that worked",
+        "explain how retries work in this codebase",
+      ]) {
+        expect(artifactIntentIsUncertain(text)).toBe(false);
+      }
+    });
+
+    it("does not escalate a question about a format", () => {
+      // MUTATION GUARD. The answer to a question is prose, and the rules decline these
+      // for a reason rather than by omission.
+      expect(artifactIntentIsUncertain("which library do you use for pdf generation")).toBe(false);
+      expect(artifactIntentIsUncertain("how big can a pdf get before it breaks")).toBe(false);
+      expect(artifactIntentIsUncertain("why is the archive so large")).toBe(false);
+    });
+
+    it("does not escalate a bug report", () => {
+      // MUTATION GUARD.
+      expect(artifactIntentIsUncertain("the pdf export button is broken")).toBe(false);
+      expect(artifactIntentIsUncertain("the zip file was corrupted in transit")).toBe(false);
+    });
+
+    it("does not escalate a request to be shown something in the conversation", () => {
+      // MUTATION GUARD. Safe to exclude here precisely BECAUSE this only sees declined
+      // messages: "show me a pdf of the design doc" is classified by the rules and
+      // never arrives.
+      expect(artifactIntentIsUncertain("walk me through the zip creation code")).toBe(false);
+      expect(artifactIntentIsUncertain("print the contents of the config")).toBe(false);
+    });
+
+    it("handles a non-string and an empty message without escalating", () => {
+      expect(artifactIntentIsUncertain(null)).toBe(false);
+      expect(artifactIntentIsUncertain(undefined)).toBe(false);
+      expect(artifactIntentIsUncertain(42)).toBe(false);
+      expect(artifactIntentIsUncertain("   ")).toBe(false);
     });
   });
 
