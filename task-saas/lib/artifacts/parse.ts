@@ -40,6 +40,39 @@ export interface ArtifactParseResult {
 
 const SUMMARY_RE = /<codemind_summary>([\s\S]*?)<\/codemind_summary>/i;
 const ARTIFACT_OPEN_RE = /<codemind_artifact\s+type="([^"]*)"\s+name="([^"]*)"\s*>/i;
+
+/**
+ * TOLERATED MALFORMATION: the filename written as a bare token, with `name="` and its
+ * closing quote dropped.
+ *
+ *   <codemind_artifact type="zip" nodejs-typescript-todo-cli.zip>
+ *
+ * MEASURED, not imagined: three of twelve multi-file cases in the 2026-09-03 GLM 5.3
+ * Flash run emitted exactly this and were rejected with "the model did not produce an
+ * artifact block" -- a complete, well-formed project thrown away over the attribute
+ * syntax around a filename that was sitting right there.
+ *
+ * WHY THIS ONE IS RECOVERABLE AND THE OTHER IS NOT. Two envelope malformations appeared
+ * in that run. Here the filename is PRESENT and only its syntax is wrong, so recovery
+ * reads what the model actually chose. In the other, the model closed the summary with
+ * `</codemind_artifact>` and never opened the block, so the name does not exist anywhere
+ * in the output -- recovering that would mean INVENTING a filename, which is a different
+ * decision and deliberately not taken here.
+ *
+ * The token must contain a dot, so this matches something filename-shaped rather than
+ * any stray word. The extracted name then goes through the same filename validation as
+ * a quoted one, so recovery cannot smuggle in something a canonical tag could not.
+ *
+ * THE TWO PATTERNS ARE MUTUALLY EXCLUSIVE, which is a property rather than an ordering
+ * rule: `name="x.zip"` contains `=` and `"`, both excluded from the token above, so this
+ * pattern cannot match a well-formed tag at any position. Trying the canonical one first
+ * is therefore defensive and not load-bearing -- swapping the order survives mutation
+ * testing, correctly, because it changes nothing. The order stays because it reads in
+ * the direction the logic runs, not because it is holding anything up.
+ */
+const ARTIFACT_OPEN_BARE_NAME_RE =
+  /<codemind_artifact\s+type="([^"]*)"\s+([^\s"'<>=]*\.[^\s"'<>=]*)\s*>/i;
+
 /**
  * Locate the closing sentinel, case-insensitively, returning offsets into the ORIGINAL
  * string.
@@ -95,7 +128,10 @@ export function parseArtifactOutput(rawOutput: string): ArtifactParseResult {
   const summaryMatch = SUMMARY_RE.exec(text);
   const summary = summaryMatch ? summaryMatch[1].trim() || null : null;
 
-  const openMatch = ARTIFACT_OPEN_RE.exec(text);
+  // Canonical form first, then the tolerated bare-token form. The two cannot match the
+  // same input -- see ARTIFACT_OPEN_BARE_NAME_RE -- so this order documents intent
+  // rather than enforcing correctness.
+  const openMatch = ARTIFACT_OPEN_RE.exec(text) ?? ARTIFACT_OPEN_BARE_NAME_RE.exec(text);
   if (!openMatch) {
     errors.push("the model did not produce an artifact block");
     return { summary, artifact: null, errors };

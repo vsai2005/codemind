@@ -154,8 +154,29 @@ export function findTruncation(filePath: string, content: string): string | null
     return `"${filePath}" ends with a continuation marker ("${lastLine.slice(0, 40)}")`;
   }
 
-  // An odd number of fences means a Markdown code block was left open.
-  const fences = content.split("```").length - 1;
+  /**
+   * An odd number of fence DELIMITERS means a Markdown code block was left open.
+   *
+   * COUNTED AT LINE START, which is what Markdown actually requires. Counting every
+   * occurrence anywhere in the content -- `content.split("```").length - 1` -- also
+   * counts prose, and prose about Markdown is exactly what a README contains.
+   *
+   * MEASURED: zip-markdown-tool was rejected in the 2026-09-03 GLM 5.3 Flash run for an
+   * "unclosed code fence" it did not have. Its README held three properly paired fences
+   * and one sentence mentioning them:
+   *
+   *   - Fenced code blocks (```) with language labels
+   *
+   * Seven occurrences, an odd number, and a complete working project was thrown away
+   * over a line of documentation. A false rejection is expensive and silent: the user is
+   * told their project is malformed when it is not.
+   *
+   * Up to three leading spaces stay a fence per CommonMark; four or more make it an
+   * indented code block, where backticks are literal text rather than a delimiter.
+   */
+  const fences = content
+    .split("\n")
+    .filter((line) => /^ {0,3}```/.test(line)).length;
   if (fences % 2 !== 0) return `"${filePath}" has an unclosed code fence`;
 
   if (CODE_EXTENSIONS.test(filePath)) {

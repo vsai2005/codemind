@@ -52,6 +52,12 @@ complete file content
 </codemind_artifact>
 
 - Paths are relative POSIX paths such as "src/app/page.tsx". Never absolute, never containing "..", never using backslashes.
+- The opening tag needs BOTH attributes written out in full, including the word "name",
+  the equals sign and the quotes: name="something.zip". A bare filename is not valid.
+- Name the archive after what the project IS: a todo CLI is "todo-cli.zip", a React
+  counter app is "react-counter.zip".
+- "kebab-case-name.zip" above is a placeholder showing the attribute's shape. Never emit
+  it, and never reuse a filename from these instructions.
 - At most ${ARTIFACT_LIMITS.maxFiles} files, and at most ${Math.floor(ARTIFACT_LIMITS.maxFileBytes / 1024)}KB per file.
 - Include everything needed to install and run: manifest, config, source, and a short README.md.
 
