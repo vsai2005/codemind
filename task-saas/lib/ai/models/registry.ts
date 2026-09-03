@@ -327,6 +327,52 @@ function buildRegistry(): ModelDescriptor[] {
       strengths: ["Long Context", "Coding", "Reasoning"],
       enabled: true,
     },
+
+    {
+      /**
+       * NOT A CHAT MODEL. This exists to answer one routing question in a few hundred
+       * milliseconds, and `internal` keeps it out of the picker and out of the default.
+       *
+       * CHOSEN BY MEASUREMENT, after guessing failed twice. NVIDIA advertises 81 models
+       * and only TWELVE are servable with these credentials; the rest 404 on the chat
+       * endpoint. Of those twelve, most are reasoning models that answer a one-word
+       * prompt with an empty string or a thinking pass, and several are special-purpose
+       * (safety classifiers, translation).
+       *
+       * Two could follow "reply with exactly one word", and this one won on every axis
+       * that matters, over three passes of six classification cases:
+       *
+       *   nvidia/ising-calibration-1.5-31b     235ms avg, 268ms max, 6/6 one-word, 5/6
+       *   meta/llama-3.2-11b-vision-instruct  1174ms avg, 5258ms max, 6/6 one-word, 4/6
+       *
+       * The counts understate it. Llama's error was a FALSE POSITIVE ("my teammate sent
+       * over a zip yesterday" -> ZIP), which would hand someone an archive they never
+       * asked for; this model's single error is conservative ("can you write me a script
+       * for that" -> CHAT), which just declines a rescue and leaves the previous
+       * behaviour. For a classifier that can only ever ADD an artifact, a conservative
+       * error costs nothing and a false positive is the whole risk.
+       *
+       * ENV-OVERRIDABLE, and that is not a formality here. This id is not a well-known
+       * public model, and the last OpenRouter entry in this file was deleted when its id
+       * 404'd upstream. If it disappears, point CODEMIND_INTENT_PROVIDER_MODEL at
+       * meta/llama-3.2-11b-vision-instruct, which was measured working above, and expect
+       * the latency and the false positive that come with it.
+       */
+      id: "ising-calibration-1-5",
+      displayName: "Ising Calibration 1.5",
+      provider: "nvidia",
+      providerLabel: "NVIDIA",
+      providerModelId:
+        process.env.CODEMIND_INTENT_PROVIDER_MODEL || "nvidia/ising-calibration-1.5-31b",
+      providerContextTokens: 131_072,
+      // The classification prompt is a few hundred tokens and the answer is one word.
+      maxOutputTokens: 4_096,
+      supportsStreaming: true,
+      supportsVision: false,
+      strengths: ["Classification"],
+      enabled: true,
+      internal: true,
+    },
   ];
 }
 
@@ -349,7 +395,10 @@ export function getNvidiaVisionModelId(): string {
 
 /** Every model an operator has left enabled, in registry order. */
 export function listModels(): ModelDescriptor[] {
-  return registry().filter((descriptor) => descriptor.enabled);
+  // `internal` entries are excluded here rather than at each call site, which is what
+  // keeps them out of BOTH the picker and `getDefaultModelId` — a background model
+  // silently becoming the house default would be a bad way to find out.
+  return registry().filter((descriptor) => descriptor.enabled && !descriptor.internal);
 }
 
 /**
@@ -411,7 +460,16 @@ export function getDefaultModelId(): string {
  * This is the enforcement point described in the module header: an id that is not in the
  * table is rejected here and never reaches a provider API.
  */
-export function resolveModel(id: string): ResolvedModel {
+export function resolveModel(
+  id: string,
+  /**
+   * Set by background callers that resolve an `internal` model deliberately. Absent on
+   * the chat path, so a client that sends an internal id by hand is refused: the route
+   * passes the user's requested id straight to this function, and `listModels` hiding
+   * the entry is a UI fact, not a guarantee.
+   */
+  options?: { allowInternal?: boolean }
+): ResolvedModel {
   const descriptor = getModelDescriptor(id);
 
   // Naming the rejected id keeps the failure debuggable. It is a value the caller already
@@ -426,6 +484,10 @@ export function resolveModel(id: string): ResolvedModel {
 
   if (descriptor.comingSoon) {
     throw new Error(`Model is not yet available: ${id}`);
+  }
+
+  if (descriptor.internal && !options?.allowInternal) {
+    throw new Error(`Model is not selectable: ${id}`);
   }
 
   const adapter = getProviderAdapter(descriptor.provider);

@@ -38,9 +38,8 @@ const reply = (text: string) => generateText.mockResolvedValue({ text });
 
 beforeEach(() => {
   generateText.mockReset();
-  // Enabled for every test EXCEPT the switch block below, which sets its own values.
-  // The shipped default is off; see intentEscalationEnabled for the measurement.
-  process.env.CODEMIND_INTENT_ESCALATION = "true";
+  // The shipped default is on; the switch block below sets its own values.
+  delete process.env.CODEMIND_INTENT_ESCALATION;
   delete process.env.CODEMIND_INTENT_TIMEOUT_MS;
 });
 
@@ -150,38 +149,39 @@ describe("the operator switch", () => {
     delete process.env.CODEMIND_INTENT_ESCALATION;
   });
 
-  it("is OFF unless explicitly enabled", () => {
+  it("is ON by default", () => {
     /**
-     * The default is a measurement, not caution. Every model this deployment can reach
-     * is a reasoning model that cannot produce a one-word answer, and the fastest of
-     * them took five seconds; a live run over twelve messages produced twelve timeouts
-     * and zero rescues. Enabled by default, this feature would be pure added latency.
+     * It shipped OFF, because every model in the registry then was a reasoning model
+     * that could not answer a one-word prompt in under five seconds. Adding
+     * `ising-calibration-1-5` changed that: p50 240ms, p90 320ms, stable answers over
+     * eight repeats. The default follows the measurement in both directions.
      */
-    expect(intentEscalationEnabled()).toBe(false);
+    expect(intentEscalationEnabled()).toBe(true);
   });
 
-  it('is on for exactly "true"', () => {
-    process.env.CODEMIND_INTENT_ESCALATION = "true";
+  it('is off for exactly "false"', () => {
+    process.env.CODEMIND_INTENT_ESCALATION = "false";
 
-    expect(intentEscalationEnabled()).toBe(true);
+    expect(intentEscalationEnabled()).toBe(false);
   });
 
   it("does not call the provider at all when disabled", async () => {
     // MUTATION GUARD. A switch that returns null but still pays for the call would pass
     // a result-only assertion and defeat the entire point of having a switch.
+    process.env.CODEMIND_INTENT_ESCALATION = "false";
     reply("PDF");
 
     expect(await classifyArtifactIntentWithModel("pdf please")).toBeNull();
     expect(generateText).not.toHaveBeenCalled();
   });
 
-  it("stays off for any other value, including a near-miss", () => {
-    // "1", "on" and "yes" are NOT the switch. An operator who typed one of those has
-    // not enabled anything, and a feature that costs latency should need an unambiguous
-    // instruction to start costing it.
-    for (const value of ["1", "on", "yes", "TRUE", "false", ""]) {
+  it("stays on for any other value, including a near-miss", () => {
+    // "0", "off" and "no" are NOT the switch. An operator who typed one of those has
+    // not disabled anything, and should see the feature still running rather than
+    // silently getting a different deployment than they think.
+    for (const value of ["0", "off", "no", "FALSE", "true", ""]) {
       process.env.CODEMIND_INTENT_ESCALATION = value;
-      expect(intentEscalationEnabled()).toBe(false);
+      expect(intentEscalationEnabled()).toBe(true);
     }
   });
 });

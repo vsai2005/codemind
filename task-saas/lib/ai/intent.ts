@@ -340,6 +340,18 @@ const DELIVERABLE_NOUN =
   /\b(?:pdfs?|zips?|archives?|files?|documents?|downloads?|scripts?|components?|modules?|projects?|repos?|repositories|codebases?|packages?|bundles?)\b/;
 
 /**
+ * A message that is NOTHING BUT a deliverable noun: "pdf", "the pdf", "zips".
+ *
+ * The rules are confident about these and say so in tests: the bare noun alone is never
+ * a request. Escalating them anyway hands the decision to a model that reads "the pdf"
+ * as an order -- measured, stably, eight times out of eight. A case the rules have
+ * already DECIDED must not be re-opened by the escalation path just because the decision
+ * happened to be null.
+ */
+const BARE_NOUN_ONLY =
+  /^\s*(?:a|an|the|my|our)?\s*(?:pdfs?|zips?|files?|archives?|documents?|downloads?)\s*[.!?]?\s*$/;
+
+/**
  * Is this a message the rules DECLINED but should not be confident about?
  *
  * THE POINT OF THE HYBRID. `detectArtifactIntent` returning null covers two very
@@ -369,6 +381,7 @@ export function artifactIntentIsUncertain(rawText: unknown): boolean {
   if (text.trim().length === 0) return false;
 
   if (!DELIVERABLE_NOUN.test(text) && !FILENAME_REF.test(text)) return false;
+  if (BARE_NOUN_ONLY.test(text)) return false;
   if (QUESTION_WORD.test(text)) return false;
   if (FILE_IS_BROKEN.test(text)) return false;
   // "walk me through the zip creation code" -- a request to be told, not handed. Safe

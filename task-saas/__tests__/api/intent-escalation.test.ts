@@ -124,9 +124,8 @@ describe("model-backed intent escalation, through the route", () => {
   beforeEach(() => {
     vi.mocked(auth).mockResolvedValue({ user: { id: "user-1" } } as never);
     process.env.NVIDIA_API_KEY = "nvapi-testkeytestkeytestkeytestkey";
-    // The shipped default is OFF -- see intentEscalationEnabled for why. These tests
-    // are about what happens when an operator turns it on.
-    process.env.CODEMIND_INTENT_ESCALATION = "true";
+    // On by default; the switch test below turns it off explicitly.
+    delete process.env.CODEMIND_INTENT_ESCALATION;
     __resetRateLimits();
     __resetScheduler();
     streamText.mockReturnValue({
@@ -210,7 +209,7 @@ describe("model-backed intent escalation, through the route", () => {
   });
 
   it("the switch removes the call from the request path", async () => {
-    delete process.env.CODEMIND_INTENT_ESCALATION;
+    process.env.CODEMIND_INTENT_ESCALATION = "false";
     respond("ZIP");
 
     const res = await POST(chatRequest("can you zip these files"));

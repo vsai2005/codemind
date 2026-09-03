@@ -66,6 +66,20 @@ export interface ModelDescriptor {
    * disables the row) and server-side (`resolveModel` rejects the id).
    */
   comingSoon?: boolean;
+  /**
+   * Resolvable for background work, never offered to a user.
+   *
+   * A THIRD STATE, because the existing two could not express this. `enabled: false`
+   * hides a model AND makes it unresolvable, so it cannot serve anything. Plain
+   * `enabled: true` makes it appear in the picker as a chat option. A model that exists
+   * only to answer a routing question needs to be reachable by name and absent from the
+   * menu, which is neither.
+   *
+   * Enforced in two places: `listModels` omits it, so it reaches neither the picker nor
+   * `getDefaultModelId`; and `resolveModel` refuses it unless the caller passes
+   * `allowInternal`, so a client cannot select it by sending the id directly.
+   */
+  internal?: boolean;
 }
 
 /** Client-safe. Never carries credentials or base URLs. */

@@ -531,6 +531,35 @@ describe("detectArtifactIntent", () => {
       expect(artifactIntentIsUncertain("why is the archive so large")).toBe(false);
     });
 
+    it("does not escalate a message that is only a noun", () => {
+      /**
+       * MEASURED, and the reason this exclusion exists rather than trusting the model.
+       * "the pdf" escalates to a classifier that answers PDF eight times out of eight,
+       * so the user is handed a document from a two-word mention. The rules already
+       * DECIDED this case -- the bare noun alone is never a request, asserted above --
+       * and a decision the rules made must not be re-opened just because it was null.
+       */
+      for (const text of ["pdf", "pdfs", "the pdf", "a zip", "the archive", "my files"]) {
+        expect(artifactIntentIsUncertain(text)).toBe(false);
+      }
+    });
+
+    it("still escalates a bare noun that carries a request around it", () => {
+      /**
+       * The exclusion is for messages that are ONLY the noun. Anything else stays
+       * eligible, or it swallows the rescues this whole path exists for.
+       *
+       * THE SECOND AND THIRD FIXTURES ARE THE ANCHOR GUARD, added after the rule
+       * survived mutation. Both OPEN with a deliverable noun, so a pattern missing its
+       * `$` matches their first two words and silently stops escalating a real request
+       * -- the failure mode is a feature that quietly does less, which no other
+       * assertion here would notice.
+       */
+      expect(artifactIntentIsUncertain("can you zip these files")).toBe(true);
+      expect(artifactIntentIsUncertain("zip of the src directory please")).toBe(true);
+      expect(artifactIntentIsUncertain("files for the auth module")).toBe(true);
+    });
+
     it("does not escalate a bug report", () => {
       // MUTATION GUARD.
       expect(artifactIntentIsUncertain("the pdf export button is broken")).toBe(false);
