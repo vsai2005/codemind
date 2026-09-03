@@ -267,7 +267,7 @@ export function validateArtifact(
 
     return errors.length > 0
       ? { ok: false, errors }
-      : { ok: true, artifact: { type: "pdf", filename, files: [], markdown } };
+      : { ok: true, artifact: { type: "pdf", filename, files: [], markdown, nameSource: raw.nameSource } };
   }
 
   // --- ZIP / FILE --------------------------------------------------------
@@ -339,5 +339,6 @@ export function validateArtifact(
 
   if (errors.length > 0) return { ok: false, errors };
 
-  return { ok: true, artifact: { type: expectedType, filename, files } };
+  // Carried through unchanged: validation may reject a name but never re-sources it.
+  return { ok: true, artifact: { type: expectedType, filename, files, nameSource: raw.nameSource } };
 }

@@ -1706,6 +1706,8 @@ async function persistTurn(
       userId,
       type: artifact.type,
       filename: artifact.filename,
+      // Recorded so a synthesized name is distinguishable from one the model chose.
+      nameSource: artifact.nameSource,
       fileCount: artifact.files.length,
       byteSize,
       verification: verification as unknown as Prisma.InputJsonValue,

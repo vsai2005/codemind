@@ -16,6 +16,7 @@ const zip: NormalizedArtifact = {
     { path: "a.ts", content: "1" },
     { path: "b.ts", content: "2" },
   ],
+  nameSource: "model",
 };
 
 describe("parseAllArtifactBlocks", () => {
@@ -210,11 +211,17 @@ continue`;
 describe("synthesizeContent", () => {
   it("describes each artifact type", () => {
     expect(synthesizeContent([zip])).toBe("Your project is ready — demo.zip contains 2 files.");
-    expect(synthesizeContent([{ type: "pdf", filename: "d.pdf", files: [], markdown: "x" }])).toBe(
+    expect(
+      synthesizeContent([
+        { type: "pdf", filename: "d.pdf", files: [], markdown: "x", nameSource: "model" },
+      ])
+    ).toBe(
       "Your document d.pdf is ready."
     );
     expect(
-      synthesizeContent([{ type: "file", filename: "m.ts", files: [{ path: "m.ts", content: "x" }] }])
+      synthesizeContent([
+        { type: "file", filename: "m.ts", files: [{ path: "m.ts", content: "x" }], nameSource: "model" },
+      ])
     ).toBe("I created m.ts.");
   });
 

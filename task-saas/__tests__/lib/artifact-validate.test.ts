@@ -4,7 +4,7 @@ import { parseArtifactOutput } from "@/lib/artifacts/parse";
 import type { RawArtifact } from "@/lib/artifacts/parse";
 
 function zipArtifact(files: Array<{ path: string; content: string }>): RawArtifact {
-  return { type: "zip", name: "project.zip", files, body: "" };
+  return { type: "zip", name: "project.zip", files, body: "", nameSource: "model" };
 }
 
 describe("findTruncation", () => {
@@ -130,7 +130,13 @@ describe("validateArtifact", () => {
   });
 
   it("enforces the filename extension for the type", () => {
-    const bad: RawArtifact = { type: "zip", name: "project.tar", files: [], body: "" };
+    const bad: RawArtifact = {
+      type: "zip",
+      name: "project.tar",
+      files: [],
+      body: "",
+      nameSource: "model",
+    };
     expect(validateArtifact(bad, "zip")).toMatchObject({ ok: false });
   });
 
@@ -143,12 +149,19 @@ describe("validateArtifact", () => {
         { path: "extra.ts", content: "export const b = 2;" },
       ],
       body: "",
+      nameSource: "model",
     };
     expect(validateArtifact(raw, "file")).toMatchObject({ ok: false });
   });
 
   it("does not trust the model's declared type over server intent", () => {
-    const raw: RawArtifact = { type: "file", name: "x.zip", files: [], body: "" };
+    const raw: RawArtifact = {
+      type: "file",
+      name: "x.zip",
+      files: [],
+      body: "",
+      nameSource: "model",
+    };
     const result = validateArtifact(raw, "zip");
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors.join(" ")).toMatch(/expected a zip artifact/);

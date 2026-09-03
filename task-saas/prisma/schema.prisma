@@ -304,6 +304,22 @@ model Artifact {
   byteSize  Int          @default(0)
   payload   Json
 
+  /// Where `filename` came from: "model", "model-recovered", "synthesized", or
+  /// "unrecorded".
+  ///
+  /// NULLABLE, and null means the row predates this column — not that the name is
+  /// untrustworthy. The same rule as `verification` below: absence is a distinct state
+  /// from any recorded value, and collapsing it into one would inflate whichever
+  /// category it was folded into.
+  ///
+  /// WHY A COLUMN RATHER THAN A PAYLOAD FIELD. It is already in `payload`, but a
+  /// measurement that wants "how many turns shipped a name we invented" should be one
+  /// indexed predicate, not a JSON scan over every artifact ever written. The question
+  /// this answers is a reporting question, and it went unanswerable once already: two
+  /// arm B turns persisted as "project.zip" with a real filename in their output and
+  /// looked like clean passes in every available metric.
+  nameSource String?
+
   /// Static verification report for this artifact — see lib/artifacts/verify.ts.
   ///
   /// NULLABLE, and the null case means something specific: this artifact predates

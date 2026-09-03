@@ -29,11 +29,47 @@ export interface ArtifactFile {
  * - `file` → exactly one file
  * - `pdf`  → no files; renderable Markdown lives in `markdown`
  */
+/**
+ * Where an artifact's filename came from.
+ *
+ * WHY THIS IS RECORDED. The parser recovers from malformed opening tags, and one of
+ * those recoveries INVENTS a name because the model never emitted one. Without this
+ * field a persisted artifact called "project.zip" is indistinguishable from one the
+ * model deliberately named that, so no measurement can separate "the model named this"
+ * from "we made it up" after the fact.
+ *
+ * That is not hypothetical: in the arm B run of 2026-09-03, two turns persisted as
+ * "project.zip" with a perfectly good filename sitting in their output, and both
+ * reported ok=true with full check coverage. They looked like clean passes in every
+ * metric available.
+ *
+ *   "model"           the canonical tag carried it
+ *   "model-recovered" read out of a malformed tag -- still the model's own choice
+ *   "synthesized"     no name existed anywhere in the output; this one is ours
+ *
+ * The middle value exists because collapsing it into either neighbour loses the
+ * distinction that matters: a recovered name is as trustworthy as a canonical one, and
+ * a synthesized name is not trustworthy at all.
+ */
+export type ArtifactNameSource =
+  | "model"
+  | "model-recovered"
+  | "synthesized"
+  /**
+   * Read back from a row written before this field existed. NEVER produced by the
+   * parser -- only by reconstructing a legacy payload, where the answer is genuinely
+   * unknown. Kept distinct from the three real values so historical rows cannot be
+   * silently counted as model-named, which is the exact conflation this field exists
+   * to prevent.
+   */
+  | "unrecorded";
+
 export interface NormalizedArtifact {
   type: ArtifactType;
   filename: string;
   files: ArtifactFile[];
   markdown?: string;
+  nameSource: ArtifactNameSource;
 }
 
 /** Client-safe artifact descriptor. Deliberately carries no file contents. */

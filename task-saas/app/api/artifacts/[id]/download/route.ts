@@ -21,6 +21,15 @@ const payloadSchema = z.object({
   filename: z.string().min(1),
   files: z.array(z.object({ path: z.string(), content: z.string() })),
   markdown: z.string().optional(),
+  /**
+   * Absent on every row written before name provenance was recorded. Defaulted to
+   * "unrecorded" rather than to a real value, so a legacy artifact is never mistaken
+   * for one the model named itself.
+   */
+  nameSource: z
+    .enum(["model", "model-recovered", "synthesized", "unrecorded"])
+    .optional()
+    .default("unrecorded"),
 });
 
 export async function GET(

@@ -18,6 +18,7 @@ const project = (files: Record<string, string>): NormalizedArtifact => ({
   type: "zip",
   filename: "project.zip",
   files: Object.entries(files).map(([path, content]) => ({ path, content })),
+  nameSource: "model",
 });
 
 const statusOf = (
@@ -290,6 +291,7 @@ describe("structural sanity", () => {
         { path: "src/a.ts", content: "export const a = 1;" },
         { path: "src/a.ts", content: "export const a = 2;" },
       ],
+      nameSource: "model",
     };
 
     const report = verifyArtifact(artifact);
@@ -306,6 +308,7 @@ describe("artifacts that are not multi-file projects", () => {
       filename: "doc.pdf",
       files: [],
       markdown: "# Report",
+      nameSource: "model",
     });
 
     expect(report.ok).toBe(true);
@@ -322,6 +325,7 @@ describe("artifacts that are not multi-file projects", () => {
       type: "file",
       filename: "script.ts",
       files: [{ path: "script.ts", content: `import { x } from "./missing";\nexport const y = x;` }],
+      nameSource: "model",
     });
 
     // Its import cannot resolve, and that is not a defect: the user asked for one file,

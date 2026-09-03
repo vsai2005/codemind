@@ -26,6 +26,7 @@ const project = (files: Record<string, string>): NormalizedArtifact => ({
   type: "zip",
   filename: "project.zip",
   files: Object.entries(files).map(([path, content]) => ({ path, content })),
+  nameSource: "model",
 });
 
 const ran = (r: ReturnType<typeof verifyArtifact>): number =>
@@ -81,6 +82,7 @@ describe("verification coverage", () => {
       type: "file",
       filename: "debounce.ts",
       files: [{ path: "debounce.ts", content: "export const debounce = () => {};" }],
+      nameSource: "model",
     });
 
     expect(report.ok).toBe(true);
@@ -95,6 +97,7 @@ describe("verification coverage", () => {
       filename: "doc.pdf",
       files: [],
       markdown: "# Report",
+      nameSource: "model",
     });
 
     expect(report.ok).toBe(true);
@@ -147,6 +150,7 @@ describe("verification coverage", () => {
       type: "file",
       filename: "x.ts",
       files: [{ path: "x.ts", content: "export const x = 1;" }],
+      nameSource: "model",
     });
     const python = verifyArtifact(project({ "main.py": "import os\n", "README.md": "# d" }));
     const clean = verifyArtifact(

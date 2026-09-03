@@ -314,6 +314,8 @@ async function main(): Promise<void> {
             userId: user.id,
             type: gen!.artifact.type,
             filename: gen!.artifact.filename,
+            // Recorded so a synthesized name is distinguishable from one the model chose.
+            nameSource: gen!.artifact.nameSource,
             fileCount: gen!.artifact.files.length,
             byteSize: body.byteLength,
             verification: gen!.verification as unknown as object,

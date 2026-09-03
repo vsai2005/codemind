@@ -23,6 +23,7 @@ const project = (files: Record<string, string>): NormalizedArtifact => ({
   type: "zip",
   filename: "project.zip",
   files: Object.entries(files).map(([path, content]) => ({ path, content })),
+  nameSource: "model",
 });
 
 const codes = (findings: Array<{ code: string }>): string[] => findings.map((f) => f.code);

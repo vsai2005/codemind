@@ -1,4 +1,4 @@
-import { isArtifactType } from "./types";
+import { isArtifactType, type ArtifactNameSource } from "./types";
 
 /**
  * Parser for the model's artifact wire format.
@@ -30,6 +30,8 @@ export interface RawArtifact {
   files: RawArtifactFile[];
   /** Body text for `pdf` artifacts. */
   body: string;
+  /** Whether `name` is the model's own choice or one this parser invented. */
+  nameSource: ArtifactNameSource;
 }
 
 export interface ArtifactParseResult {
@@ -178,19 +180,24 @@ export function parseArtifactOutput(rawOutput: string): ArtifactParseResult {
    * each requires something the others exclude -- so the order documents intent rather
    * than enforcing correctness.
    */
+  const canonical = ARTIFACT_OPEN_RE.exec(text);
   const openMatch =
-    ARTIFACT_OPEN_RE.exec(text) ??
+    canonical ??
     ARTIFACT_OPEN_JUNK_BEFORE_NAME_RE.exec(text) ??
     ARTIFACT_OPEN_BARE_NAME_RE.exec(text);
 
   let declaredType: string;
   let declaredName: string;
   let bodyStart: number;
+  let nameSource: ArtifactNameSource;
 
   if (openMatch) {
     declaredType = openMatch[1].trim().toLowerCase();
     declaredName = openMatch[2].trim();
     bodyStart = openMatch.index + openMatch[0].length;
+    // A name read out of a malformed tag is still the model's own choice, and is
+    // recorded as such: only the invented one below is untrustworthy.
+    nameSource = openMatch === canonical ? "model" : "model-recovered";
   } else {
     /**
      * NO OPENING TAG ANYWHERE, the last and least faithful recovery.
@@ -214,6 +221,7 @@ export function parseArtifactOutput(rawOutput: string): ArtifactParseResult {
     declaredType = "zip";
     declaredName = RECOVERED_ARCHIVE_NAME;
     bodyStart = firstFile.index;
+    nameSource = "synthesized";
   }
 
   if (!isArtifactType(declaredType)) {
@@ -231,7 +239,7 @@ export function parseArtifactOutput(rawOutput: string): ArtifactParseResult {
   if (declaredType === "pdf") {
     return {
       summary,
-      artifact: { type: declaredType, name: declaredName, files: [], body: body.trim() },
+      artifact: { type: declaredType, name: declaredName, files: [], body: body.trim(), nameSource },
       errors,
     };
   }
@@ -245,6 +253,7 @@ export function parseArtifactOutput(rawOutput: string): ArtifactParseResult {
         name: declaredName,
         files: [{ path: declaredName, content: stripFenced(body) }],
         body,
+        nameSource,
       },
       errors,
     };
@@ -272,7 +281,7 @@ export function parseArtifactOutput(rawOutput: string): ArtifactParseResult {
 
   return {
     summary,
-    artifact: { type: declaredType, name: declaredName, files, body },
+    artifact: { type: declaredType, name: declaredName, files, body, nameSource },
     errors,
   };
 }
@@ -326,7 +335,7 @@ export function parseAllArtifactBlocks(content: string): {
 
     if (isSelfClosing) {
       blocks.push({
-        artifact: { type: declaredType, name: declaredName, files: [], body: "" },
+        artifact: { type: declaredType, name: declaredName, files: [], body: "", nameSource: "model" },
         start,
         end: start + open[0].length,
         selfClosing: true,
@@ -350,7 +359,13 @@ export function parseAllArtifactBlocks(content: string): {
 
     if (declaredType === "pdf") {
       blocks.push({
-        artifact: { type: declaredType, name: declaredName, files: [], body: body.trim() },
+        artifact: {
+          type: declaredType,
+          name: declaredName,
+          files: [],
+          body: body.trim(),
+          nameSource: "model",
+        },
         start,
         end,
         selfClosing: false,
@@ -362,6 +377,7 @@ export function parseAllArtifactBlocks(content: string): {
           name: declaredName,
           files: [{ path: declaredName, content: stripFenced(body) }],
           body,
+          nameSource: "model",
         },
         start,
         end,
@@ -384,7 +400,7 @@ export function parseAllArtifactBlocks(content: string): {
       }
 
       blocks.push({
-        artifact: { type: declaredType, name: declaredName, files, body },
+        artifact: { type: declaredType, name: declaredName, files, body, nameSource: "model" },
         start,
         end,
         selfClosing: false,
@@ -418,7 +434,13 @@ export function parseArtifactBlockByName(
   const body = match[1];
 
   if (type === "file") {
-    return { type, name: filename, files: [{ path: filename, content: stripFenced(body) }], body };
+    return {
+      type,
+      name: filename,
+      files: [{ path: filename, content: stripFenced(body) }],
+      body,
+      nameSource: "model",
+    };
   }
 
   const files: RawArtifactFile[] = [];
@@ -428,7 +450,7 @@ export function parseArtifactBlockByName(
     files.push({ path: fileMatch[1].trim(), content: fileMatch[2] });
   }
 
-  return { type, name: filename, files, body };
+  return { type, name: filename, files, body, nameSource: "model" };
 }
 
 /**
