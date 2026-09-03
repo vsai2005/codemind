@@ -223,7 +223,12 @@ function ChatWorkspace(): React.ReactElement {
           {/* Sits where the reply would have been, so the failure lands where the
               user is already looking rather than in a corner. */}
           {error && !isLoading && (
-            <ChatError error={error} onRetry={retryLastMessage} disabled={isLoading} />
+            <ChatError
+                error={error}
+                onRetry={retryLastMessage}
+                disabled={isLoading}
+                onStartNewChat={() => window.location.assign("/dashboard")}
+              />
           )}
         </div>
       </div>
