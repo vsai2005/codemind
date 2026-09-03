@@ -38,7 +38,19 @@ export interface ArtifactParseResult {
   errors: string[];
 }
 
-const SUMMARY_RE = /<codemind_summary>([\s\S]*?)<\/codemind_summary>/i;
+/**
+ * The summary, closed by its own tag OR by the artifact's.
+ *
+ * THE SAME SLIP, SEEN FROM THE OTHER SIDE. When the model writes `</codemind_artifact>`
+ * where `</codemind_summary>` belonged, it destroys two things at once: the artifact's
+ * opening tag AND the summary's closing tag. Recovering the archive without this leaves
+ * the user holding a file called "project.zip" with no idea what is in it, which is most
+ * of the value gone.
+ *
+ * The alternation is safe because the match is non-greedy: whichever closer appears
+ * first wins, so a well-formed summary still ends at its own tag exactly as before.
+ */
+const SUMMARY_RE = /<codemind_summary>([\s\S]*?)<\/codemind_(?:summary|artifact)>/i;
 const ARTIFACT_OPEN_RE = /<codemind_artifact\s+type="([^"]*)"\s+name="([^"]*)"\s*>/i;
 
 /**
@@ -70,6 +82,20 @@ const ARTIFACT_OPEN_RE = /<codemind_artifact\s+type="([^"]*)"\s+name="([^"]*)"\s
  * testing, correctly, because it changes nothing. The order stays because it reads in
  * the direction the logic runs, not because it is holding anything up.
  */
+/**
+ * TOLERATED MALFORMATION: the filename emitted TWICE, once as a stray token with an
+ * orphan quote and once correctly.
+ *
+ *   <codemind_artifact type="zip" markdown-to-html.zip" name="markdown-to-html.zip">
+ *
+ * Observed live while re-probing the 2026-09-03 fixes. The real attribute is present and
+ * correct, so nothing is invented here -- only the rubbish between `type` and `name` is
+ * stepped over. `[^>]*` cannot cross a `>`, so the search stays inside the one tag and
+ * cannot reach across into a later element to borrow a name from it.
+ */
+const ARTIFACT_OPEN_JUNK_BEFORE_NAME_RE =
+  /<codemind_artifact\s+type="([^"]*)"[^>]*?\s+name="([^"]*)"\s*>/i;
+
 const ARTIFACT_OPEN_BARE_NAME_RE =
   /<codemind_artifact\s+type="([^"]*)"\s+([^\s"'<>=]*\.[^\s"'<>=]*)\s*>/i;
 
@@ -111,6 +137,24 @@ function findArtifactClose(text: string, from: number): { start: number; end: nu
   // whitespace before the ">", so the two can legitimately differ.
   return { start: match.index, end: match.index + match[0].length };
 }
+/**
+ * The name given to an archive whose opening tag never appeared.
+ *
+ * THIS ONE IS SYNTHESIS, and it is the only place in this file that invents anything.
+ * When the model closes the summary with `</codemind_artifact>` and never opens the
+ * block, the filename does not exist anywhere in the output -- there is nothing to read.
+ *
+ * The choice is between a generic name and discarding a complete, working project. Two
+ * of seventeen organic cases in the 2026-09-03 run were thrown away this way. A file the
+ * user can rename is plainly better than no file, and the summary still tells them what
+ * it is, so the cost of being wrong here is cosmetic where the cost of refusing is total.
+ *
+ * Deliberately generic rather than guessed from the summary text: a name derived by
+ * skimming prose would sometimes be confidently wrong, which reads worse than something
+ * obviously placeholder.
+ */
+export const RECOVERED_ARCHIVE_NAME = "project.zip";
+
 const FILE_RE = /<file\s+path="([^"]*)"\s*>([\s\S]*?)<\/file>/gi;
 const FILE_OPEN_RE = /<file\s+path="[^"]*"\s*>/gi;
 
@@ -128,24 +172,54 @@ export function parseArtifactOutput(rawOutput: string): ArtifactParseResult {
   const summaryMatch = SUMMARY_RE.exec(text);
   const summary = summaryMatch ? summaryMatch[1].trim() || null : null;
 
-  // Canonical form first, then the tolerated bare-token form. The two cannot match the
-  // same input -- see ARTIFACT_OPEN_BARE_NAME_RE -- so this order documents intent
-  // rather than enforcing correctness.
-  const openMatch = ARTIFACT_OPEN_RE.exec(text) ?? ARTIFACT_OPEN_BARE_NAME_RE.exec(text);
-  if (!openMatch) {
-    errors.push("the model did not produce an artifact block");
-    return { summary, artifact: null, errors };
-  }
+  /**
+   * Canonical form first, then the tolerated malformations in decreasing fidelity to
+   * what the model actually wrote. The three patterns cannot match the same input --
+   * each requires something the others exclude -- so the order documents intent rather
+   * than enforcing correctness.
+   */
+  const openMatch =
+    ARTIFACT_OPEN_RE.exec(text) ??
+    ARTIFACT_OPEN_JUNK_BEFORE_NAME_RE.exec(text) ??
+    ARTIFACT_OPEN_BARE_NAME_RE.exec(text);
 
-  const declaredType = openMatch[1].trim().toLowerCase();
-  const declaredName = openMatch[2].trim();
+  let declaredType: string;
+  let declaredName: string;
+  let bodyStart: number;
+
+  if (openMatch) {
+    declaredType = openMatch[1].trim().toLowerCase();
+    declaredName = openMatch[2].trim();
+    bodyStart = openMatch.index + openMatch[0].length;
+  } else {
+    /**
+     * NO OPENING TAG ANYWHERE, the last and least faithful recovery.
+     *
+     * The model closed the summary with `</codemind_artifact>` and never opened the
+     * block, so both the tag and the filename are missing. What IS present is a run of
+     * well-formed <file> blocks and a closing sentinel, which is a whole project.
+     *
+     * File blocks are what make this recoverable AND what make it a zip: a single-file
+     * artifact carries raw content with no <file> tags, and a pdf carries markdown, so
+     * their absence of tags means a collapsed one of those has nothing to recover from.
+     * A recovered archive still faces validateArtifact against the type the CALLER
+     * expected, so guessing zip here cannot smuggle one type in place of another.
+     */
+    const firstFile = FILE_OPEN_RE.exec(text);
+    FILE_OPEN_RE.lastIndex = 0;
+    if (!firstFile) {
+      errors.push("the model did not produce an artifact block");
+      return { summary, artifact: null, errors };
+    }
+    declaredType = "zip";
+    declaredName = RECOVERED_ARCHIVE_NAME;
+    bodyStart = firstFile.index;
+  }
 
   if (!isArtifactType(declaredType)) {
     errors.push(`unsupported artifact type "${declaredType}"`);
     return { summary, artifact: null, errors };
   }
-
-  const bodyStart = openMatch.index + openMatch[0].length;
   const close = findArtifactClose(text, bodyStart);
   if (!close) {
     errors.push("the artifact block was never closed (generation stopped early)");

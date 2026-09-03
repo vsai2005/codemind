@@ -1,15 +1,19 @@
 import { describe, it, expect } from "vitest";
-import { parseArtifactOutput } from "@/lib/artifacts/parse";
+import { parseArtifactOutput, RECOVERED_ARCHIVE_NAME } from "@/lib/artifacts/parse";
 import { validateArtifact } from "@/lib/artifacts/validate";
 
 /**
- * Two defects from the GLM 5.3 Flash measurement of 2026-09-03, arm A, 21 cases.
+ * Envelope malformations from the GLM 5.3 Flash measurement of 2026-09-03, and the fence
+ * counter that rejected a valid README.
  *
- * Four of the seventeen organic cases were rejected without a single thing being wrong
- * with the project they contained: three over the syntax around a filename, one over a
- * sentence in a README. Both fixtures below are the real shapes, copied from the
- * captured output rather than imagined.
+ * Seven of seventeen organic cases failed; four had nothing wrong with the project they
+ * carried. Every fixture below is a real shape copied from captured output.
+ *
+ * THE ORDERING PRINCIPLE for the recoveries: read what the model actually wrote wherever
+ * it wrote it, and invent only when there is provably nothing to read.
  */
+
+const FENCE = "```";
 
 const zipBody = [
   '<file path="package.json">',
@@ -25,9 +29,9 @@ const envelope = (openTag: string): string =>
 
 describe("a filename written as a bare token", () => {
   /**
-   * MEASURED: three of twelve multi-file cases emitted this exact shape and were
-   * rejected with "the model did not produce an artifact block", discarding a complete
-   * project over the attribute syntax around a filename that was present.
+   * MEASURED: three of twelve multi-file cases emitted this and were rejected with "the
+   * model did not produce an artifact block", discarding a complete project over the
+   * attribute syntax around a filename that was present.
    */
   it("is recovered, reading the name the model actually chose", () => {
     const out = parseArtifactOutput(
@@ -46,11 +50,10 @@ describe("a filename written as a bare token", () => {
     }
   });
 
-  it("never lets the loose pattern reinterpret a well-formed tag", () => {
+  it("never lets a looser pattern reinterpret a well-formed tag", () => {
     /**
-     * MUTATION GUARD. The canonical pattern must win outright. If the tolerant one ever
-     * ran first, or ran on a tag that already parsed, a correct filename could be
-     * replaced by a fragment of the attribute syntax around it.
+     * MUTATION GUARD. The canonical pattern must win outright, or a correct filename
+     * could be replaced by a fragment of the syntax around it.
      */
     const out = parseArtifactOutput(
       envelope('<codemind_artifact type="zip" name="proper-name.zip">')
@@ -59,27 +62,89 @@ describe("a filename written as a bare token", () => {
     expect(out.artifact?.name).toBe("proper-name.zip");
   });
 
-  it("does not invent a name when none was emitted at all", () => {
+  it("does not adopt a token that is not filename-shaped", () => {
     /**
-     * THE LINE BETWEEN THE TWO MALFORMATIONS, and the reason only one is fixed. Here the
-     * model closed the summary with the artifact's closing tag and never opened the
-     * block, so no filename exists anywhere in the output. Recovering this would mean
-     * INVENTING one, which is a product decision rather than a parsing one.
+     * The dot is what keeps the bare-token pattern anchored to something filename-like.
+     * "archive" is not a filename, so it is NOT adopted as one — the archive falls
+     * through to the generic recovery below rather than being named after a stray word.
      */
-    const collapsed =
-      "<codemind_summary>\nA blog.\n</codemind_artifact>\n" + zipBody + "\n</codemind_artifact>";
-    const out = parseArtifactOutput(collapsed);
+    const out = parseArtifactOutput(envelope('<codemind_artifact type="zip" archive>'));
+
+    expect(out.artifact?.name).not.toBe("archive");
+    expect(out.artifact?.name).toBe(RECOVERED_ARCHIVE_NAME);
+  });
+});
+
+describe("a filename emitted twice", () => {
+  /**
+   * OBSERVED LIVE while re-probing the first round of fixes. The real attribute is
+   * present and correct; only the rubbish before it needs stepping over.
+   */
+  it("steps over the stray token and reads the real attribute", () => {
+    const out = parseArtifactOutput(
+      envelope('<codemind_artifact type="zip" markdown-to-html.zip" name="markdown-to-html.zip">')
+    );
+
+    expect(out.errors).toEqual([]);
+    expect(out.artifact?.name).toBe("markdown-to-html.zip");
+  });
+
+  it("cannot borrow a name from a later element", () => {
+    // MUTATION GUARD. The pattern uses [^>]*, which cannot cross a ">", so the search
+    // stays inside the one tag rather than reaching into the next element for a name.
+    const out = parseArtifactOutput(
+      '<codemind_summary>x</codemind_summary>\n<codemind_artifact type="zip">\n' +
+        '<file path="a.ts" name="not-the-archive.zip">\nx\n</file>\n</codemind_artifact>'
+    );
+
+    expect(out.artifact?.name).not.toBe("not-the-archive.zip");
+  });
+});
+
+describe("an opening tag that never appeared", () => {
+  /**
+   * THE ONLY PLACE THIS PARSER INVENTS ANYTHING. The model closed the summary with
+   * </codemind_artifact> and never opened the block, so the filename does not exist
+   * anywhere in the output — there is nothing to read.
+   *
+   * Two of seventeen organic cases were discarded this way, each carrying a complete
+   * project. A generic name the user can change beats no file at all, and the summary
+   * still tells them what it is.
+   */
+  const collapsed = (body: string) =>
+    "<codemind_summary>\nA blog.\n</codemind_artifact>\n" + body + "\n</codemind_artifact>";
+
+  it("recovers the project under a generic name", () => {
+    const out = parseArtifactOutput(collapsed(zipBody));
+
+    expect(out.errors).toEqual([]);
+    expect(out.artifact?.name).toBe("project.zip");
+    expect(out.artifact?.type).toBe("zip");
+    expect(out.artifact?.files).toHaveLength(2);
+  });
+
+  it("keeps the summary, which is what tells the user what they got", () => {
+    expect(parseArtifactOutput(collapsed(zipBody)).summary).toBe("A blog.");
+  });
+
+  it("ships a placeholder-looking name rather than a confident guess", () => {
+    // Derived from the summary prose it would sometimes be plausibly wrong, which reads
+    // worse than something obviously generic.
+    expect(RECOVERED_ARCHIVE_NAME).toBe("project.zip");
+  });
+
+  it("refuses when there are no file blocks to recover", () => {
+    /**
+     * MUTATION GUARD, and the boundary of the whole recovery. File blocks are the only
+     * evidence a project is present; without them, producing an archive would be
+     * fabrication rather than recovery.
+     */
+    const out = parseArtifactOutput(
+      "<codemind_summary>\nA doc.\n</codemind_artifact>\njust prose\n</codemind_artifact>"
+    );
 
     expect(out.artifact).toBeNull();
     expect(out.errors[0]).toContain("did not produce an artifact block");
-  });
-
-  it("does not match a token that is not filename-shaped", () => {
-    // The dot is what keeps this anchored to something that looks like a filename
-    // rather than any stray word the model might leave in the tag.
-    const out = parseArtifactOutput(envelope('<codemind_artifact type="zip" archive>'));
-
-    expect(out.artifact).toBeNull();
   });
 });
 
@@ -107,19 +172,19 @@ describe("counting Markdown fences", () => {
     const readme = [
       "# Markdown Tool",
       "",
-      "- Fenced code blocks (```) with language labels",
+      `- Fenced code blocks (${FENCE}) with language labels`,
       "",
-      "```bash",
+      `${FENCE}bash`,
       "npm install",
-      "```",
+      FENCE,
       "",
-      "```bash",
+      `${FENCE}bash`,
       "npm test",
-      "```",
+      FENCE,
       "",
-      "```bash",
+      `${FENCE}bash`,
       "npm start",
-      "```",
+      FENCE,
     ].join("\n");
 
     expect(zipWith(readme).ok).toBe(true);
@@ -128,10 +193,9 @@ describe("counting Markdown fences", () => {
   it("still catches a genuinely unclosed fence", () => {
     /**
      * THE GUARD THAT MATTERS MOST. A false PASS here is worse than the false rejection
-     * just fixed: a truncated file would ship looking complete. One opener, no closer.
+     * just fixed: a truncated file would ship looking complete.
      */
-    const readme = ["# Docs", "", "```bash", "npm install"].join("\n");
-    const result = zipWith(readme);
+    const result = zipWith(["# Docs", "", `${FENCE}bash`, "npm install"].join("\n"));
 
     expect(result.ok).toBe(false);
     expect(JSON.stringify(result)).toContain("unclosed code fence");
@@ -140,21 +204,16 @@ describe("counting Markdown fences", () => {
   it("counts an indented fence but not a four-space one", () => {
     // Up to three spaces is still a fence in CommonMark; four makes it an indented code
     // block, where the backticks are literal text.
-    const threeSpaces = ["# D", "", "   ```", "x", "   ```"].join("\n");
-    expect(zipWith(threeSpaces).ok).toBe(true);
-
-    const fourSpacesOnly = ["# D", "", "    ```", "just literal text"].join("\n");
-    expect(zipWith(fourSpacesOnly).ok).toBe(true);
+    expect(zipWith(["# D", "", `   ${FENCE}`, "x", `   ${FENCE}`].join("\n")).ok).toBe(true);
+    expect(zipWith(["# D", "", `    ${FENCE}`, "just literal text"].join("\n")).ok).toBe(true);
   });
 
-  it("is not fooled by a fence closing an odd count from prose", () => {
-    // Two prose mentions and one real unclosed fence: substring counting would see an
-    // even number and pass it.
+  it("is not fooled by prose that pairs up around a real unclosed fence", () => {
     const readme = [
       "# D",
-      "Use ``` to open and ``` to close.",
+      `Use ${FENCE} to open and ${FENCE} to close.`,
       "",
-      "```bash",
+      `${FENCE}bash`,
       "npm i",
     ].join("\n");
 
